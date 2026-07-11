@@ -382,6 +382,9 @@ pub struct K2GossipFunctionalTestFactory {
     bootstrap: bool,
     /// The Kitsune2 configuration to use.
     config: K2GossipModConfig,
+    /// The sharding configuration to use, if overriding the default.
+    #[cfg(feature = "sharding")]
+    sharding_config: Option<crate::K2ShardingConfig>,
 }
 
 impl K2GossipFunctionalTestFactory {
@@ -407,7 +410,20 @@ impl K2GossipFunctionalTestFactory {
                     }
                 },
             },
+            #[cfg(feature = "sharding")]
+            sharding_config: None,
         }
+    }
+
+    /// Override the sharding configuration used by instances of this
+    /// factory.
+    #[cfg(feature = "sharding")]
+    pub fn with_sharding_config(
+        mut self,
+        config: crate::K2ShardingConfig,
+    ) -> Self {
+        self.sharding_config = Some(config);
+        self
     }
 
     /// Create a new instance of the test harness.
@@ -433,6 +449,15 @@ impl K2GossipFunctionalTestFactory {
         let builder = builder.with_default_config().unwrap();
         // Then custom configuration is applied.
         builder.config.set_module_config(&self.config).unwrap();
+        #[cfg(feature = "sharding")]
+        if let Some(sharding_config) = &self.sharding_config {
+            builder
+                .config
+                .set_module_config(&crate::K2ShardingModConfig {
+                    k2_sharding: sharding_config.clone(),
+                })
+                .unwrap();
+        }
 
         let builder = Arc::new(builder);
 

@@ -19,6 +19,10 @@ pub use peer_meta_store::K2PeerMetaStore;
 
 mod protocol;
 mod respond;
+#[cfg(feature = "sharding")]
+mod sharding;
+#[cfg(feature = "sharding")]
+pub use sharding::*;
 mod state;
 mod storage_arc;
 mod summary;

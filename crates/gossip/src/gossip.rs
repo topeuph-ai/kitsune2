@@ -32,7 +32,12 @@ impl K2GossipFactory {
 
 impl GossipFactory for K2GossipFactory {
     fn default_config(&self, config: &mut Config) -> K2Result<()> {
-        config.set_module_config(&K2GossipModConfig::default())
+        config.set_module_config(&K2GossipModConfig::default())?;
+        #[cfg(feature = "sharding")]
+        config.set_module_config(
+            &crate::sharding::K2ShardingModConfig::default(),
+        )?;
+        Ok(())
     }
 
     fn validate_config(&self, _config: &Config) -> K2Result<()> {
@@ -54,20 +59,39 @@ impl GossipFactory for K2GossipFactory {
             let config =
                 builder.config.get_module_config::<K2GossipModConfig>()?;
 
-            let gossip: DynGossip = K2Gossip::create(
+            let gossip = K2Gossip::create(
                 config.k2_gossip,
-                space_id,
-                peer_store,
-                local_agent_store,
+                space_id.clone(),
+                peer_store.clone(),
+                local_agent_store.clone(),
                 peer_meta_store,
                 op_store,
-                transport,
+                transport.clone(),
                 fetch,
                 builder.verifier.clone(),
             )
             .await?;
 
-            Ok(gossip)
+            #[cfg(feature = "sharding")]
+            {
+                let sharding_config = builder
+                    .config
+                    .get_module_config::<crate::sharding::K2ShardingModConfig>(
+                )?;
+                let sharding = crate::sharding::K2Sharding::create(
+                    sharding_config.k2_sharding,
+                    space_id,
+                    peer_store,
+                    local_agent_store,
+                    gossip.peer_meta_store.clone(),
+                    transport,
+                );
+                gossip._sharding.set(sharding).map_err(|_| {
+                    K2Error::other("Sharding instance set twice")
+                })?;
+            }
+
+            Ok(gossip as DynGossip)
         })
     }
 }
@@ -121,6 +145,10 @@ pub(crate) struct K2Gossip {
     pub(crate) _initiate_task: Arc<OnceLock<Option<DropAbortHandle>>>,
     pub(crate) _timeout_task: Arc<OnceLock<Option<DropAbortHandle>>>,
     pub(crate) _dht_update_task: Arc<OnceLock<Option<DropAbortHandle>>>,
+    /// The sharding module instance, which owns the controller task that
+    /// manages local agents' target storage arcs.
+    #[cfg(feature = "sharding")]
+    pub(crate) _sharding: Arc<OnceLock<Arc<crate::sharding::K2Sharding>>>,
 }
 
 impl K2Gossip {
@@ -163,6 +191,8 @@ impl K2Gossip {
             _initiate_task: Default::default(),
             _timeout_task: Default::default(),
             _dht_update_task: Default::default(),
+            #[cfg(feature = "sharding")]
+            _sharding: Default::default(),
         };
 
         let gossip = Arc::new(gossip);

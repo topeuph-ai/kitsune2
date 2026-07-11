@@ -1,0 +1,40 @@
+syntax = "proto3";
+
+package kitsune2.gossip.sharding;
+
+// A Kitsune2 sharding protocol message.
+//
+// Sent on the "k2sharding" transport module channel, separate from the
+// gossip protocol so that sharding coordination can evolve without
+// touching the gossip message enum.
+message K2ShardingMessage {
+  oneof msg {
+    // An announcement of intent to shrink a storage arc.
+    K2ShardingShrinkIntentMessage shrink_intent = 1;
+  }
+}
+
+// Announces that the sending agent intends to shrink its storage arc,
+// vacating the given range of DHT locations.
+//
+// This is phase one of a two-phase shrink. The sender waits long enough
+// for the announcement to have propagated, then re-checks that the vacated
+// range would still meet the redundancy target with this agent (and any
+// competing intenders that outrank it) gone. Receivers use pending intents
+// in their own controllers: sectors covered by an announced vacate are
+// treated as already lost when deciding whether to grow, and competing
+// shrink intents are tie-broken by agent id (lowest proceeds).
+message K2ShardingShrinkIntentMessage {
+  // The agent id of the intender.
+  bytes agent_id = 1;
+
+  // Inclusive start DHT location of the range being vacated.
+  uint32 vacate_start = 2;
+
+  // Inclusive end DHT location of the range being vacated.
+  uint32 vacate_end = 3;
+
+  // Timestamp (microseconds since the UNIX epoch) after which this intent
+  // is void and must be ignored, whether or not it was executed.
+  int64 expires_at_us = 4;
+}
