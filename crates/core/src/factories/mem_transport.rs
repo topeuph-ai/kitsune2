@@ -53,6 +53,7 @@ struct MemTransport {
     task_list: Arc<Mutex<tokio::task::JoinSet<()>>>,
     cmd_send: CmdSend,
     net_stats: Arc<Mutex<TransportStats>>,
+    handler: Arc<TxImpHnd>,
 }
 
 impl Drop for MemTransport {
@@ -102,7 +103,7 @@ impl MemTransport {
         // our core command runner task
         task_list.lock().unwrap().spawn(cmd_task(
             task_list.clone(),
-            handler,
+            handler.clone(),
             this_url.clone(),
             cmd_send.clone(),
             cmd_recv,
@@ -114,6 +115,7 @@ impl MemTransport {
             task_list,
             cmd_send,
             net_stats,
+            handler,
         });
 
         out
@@ -146,13 +148,26 @@ impl TxImp for MemTransport {
         Box::pin(async move {
             let (result_sender, result_receiver) =
                 tokio::sync::oneshot::channel();
-            match self.cmd_send.send(Cmd::Send(peer, data, result_sender)) {
+            let result = match self.cmd_send.send(Cmd::Send(
+                peer.clone(),
+                data,
+                result_sender,
+            )) {
                 Err(_) => Err(K2Error::other("Connection Closed")),
                 Ok(_) => match result_receiver.await {
                     Ok(result) => result,
                     Err(_) => Err(K2Error::other("Connection Closed")),
                 },
+            };
+            if result.is_err() {
+                // Per the contract on [TxImpHnd::set_unresponsive]: mark
+                // the peer when sending to it fails, as the production
+                // transport does. Without this, tests that kill nodes
+                // never see those nodes become unresponsive.
+                let _ =
+                    self.handler.set_unresponsive(peer, Timestamp::now()).await;
             }
+            result
         })
     }
 
