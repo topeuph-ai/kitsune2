@@ -22,7 +22,10 @@ fn main() {
     prost_build::Config::new()
         .bytes(["."])
         .compile_protos(
-            &["../gossip/proto/gossip.proto"],
+            &[
+                "../gossip/proto/gossip.proto",
+                "../gossip/proto/sharding.proto",
+            ],
             &["../gossip/proto/"],
         )
         .expect("Failed to compile gossip protobuf protocol files");
