@@ -520,25 +520,52 @@ impl K2Sharding {
                 .collect::<HashSet<_>>(),
             Err(_) => HashSet::new(),
         };
-        for peer in peers {
-            if peer.is_tombstone || own_ids.contains(&peer.agent) {
-                continue;
+        // Fire-and-forget, all sends in parallel, in a detached task. A
+        // send to a dead peer blocks for the transport's full connect
+        // timeout; awaiting that here — inside the check task — froze the
+        // controller for minutes under Wind Tunnel (an announce hitting 6
+        // dead peers sequentially = 6 × 60 s with the pending intent's
+        // execute time never re-checked). Delivery is best-effort by
+        // design: the intent wait is sized to dominate non-delivery, and
+        // the announcer's own intent is already in its local table.
+        let peer_meta_store = self.peer_meta_store.clone();
+        let space_id = self.space_id.clone();
+        tokio::task::spawn(async move {
+            let mut sends = Vec::new();
+            for peer in peers {
+                if peer.is_tombstone || own_ids.contains(&peer.agent) {
+                    continue;
+                }
+                let Some(url) = peer.url.clone() else {
+                    continue;
+                };
+                // A peer already marked unresponsive gets skipped: the
+                // send would just burn a connect timeout to learn what
+                // the meta store already knows.
+                if let Ok(Some(_)) =
+                    peer_meta_store.get_unresponsive(url.clone()).await
+                {
+                    continue;
+                }
+                let transport = transport.clone();
+                let space_id = space_id.clone();
+                let msg = msg.clone();
+                sends.push(async move {
+                    if let Err(e) = transport
+                        .send_module(
+                            url.clone(),
+                            space_id,
+                            SHARDING_MOD_NAME.to_string(),
+                            msg,
+                        )
+                        .await
+                    {
+                        tracing::debug!(?e, %url, "sharding: intent send failed");
+                    }
+                });
             }
-            let Some(url) = peer.url.clone() else {
-                continue;
-            };
-            if let Err(e) = transport
-                .send_module(
-                    url.clone(),
-                    self.space_id.clone(),
-                    SHARDING_MOD_NAME.to_string(),
-                    msg.clone(),
-                )
-                .await
-            {
-                tracing::debug!(?e, %url, "sharding: intent send failed");
-            }
-        }
+            futures::future::join_all(sends).await;
+        });
     }
 }
 
