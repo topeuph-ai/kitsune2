@@ -510,8 +510,18 @@ impl K2Sharding {
         let Ok(peers) = self.peer_store.get_all().await else {
             return;
         };
+        // Local agents already see the intent via the IntentTable insert
+        // in announce_shrink; sending to our own URL is refused by the
+        // transport ("Connecting to ourself") and only produces noise.
+        let own_ids = match self.local_agent_store.get_all().await {
+            Ok(agents) => agents
+                .iter()
+                .map(|a| a.agent().clone())
+                .collect::<HashSet<_>>(),
+            Err(_) => HashSet::new(),
+        };
         for peer in peers {
-            if peer.is_tombstone {
+            if peer.is_tombstone || own_ids.contains(&peer.agent) {
                 continue;
             }
             let Some(url) = peer.url.clone() else {
