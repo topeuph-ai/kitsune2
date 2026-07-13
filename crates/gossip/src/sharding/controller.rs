@@ -4,7 +4,7 @@ use super::blocks::{
     MAX_LEVEL, block_arc, home_sector, sibling_half, vacate_half,
 };
 use super::coverage::{min_over, others_coverage, subtract_sectors};
-use super::intents::{IntentTable, ShrinkIntent};
+use super::intents::{IntentTable, ShrinkIntent, retain_declared};
 use super::protocol::{
     K2ShardingMessage, K2ShardingShrinkIntentMessage,
     deserialize_sharding_message, k2_sharding_message,
@@ -177,7 +177,17 @@ impl K2Sharding {
             .count()
             + local_agents.len();
 
-        let live_intents = self.intents.live(now);
+        let mut live_intents = self.intents.live(now);
+        // Range-validation: only count an intent over sectors its
+        // announcer actually declares (see retain_declared). Uses the
+        // same peer snapshot as this tick's coverage, so intent and arc
+        // are judged on one consistent view.
+        let declared_arcs: HashMap<AgentId, DhtArc> = peers
+            .iter()
+            .filter(|p| !p.is_tombstone)
+            .map(|p| (p.agent.clone(), p.storage_arc))
+            .collect();
+        retain_declared(&mut live_intents, &declared_arcs, &own_ids);
         let lag = self.lag_estimate(&peers, &gone, now).await;
 
         let mut states = self.states.lock().await;
@@ -639,6 +649,15 @@ impl TxModuleHandler for K2Sharding {
                     intent.vacate_start / SECTOR_SIZE,
                     intent.vacate_end / SECTOR_SIZE + 1,
                 );
+                // A vacate range is always half of an aligned block, so
+                // it can never span more than half the ring; reject
+                // implausible claims before they enter the table. (Full
+                // containment in the announcer's declared arc is checked
+                // at consumption time, where a peer-store snapshot is in
+                // hand — see retain_declared.)
+                if vacate.1 - vacate.0 > super::blocks::NUM_SECTORS / 2 {
+                    return Ok(());
+                }
                 self.intents.insert(
                     AgentId::from(intent.agent_id),
                     ShrinkIntent { vacate, expires_at },
