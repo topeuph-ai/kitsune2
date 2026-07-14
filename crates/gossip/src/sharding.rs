@@ -30,6 +30,14 @@
 //! sector loss in 1248 multi-seed runs where naive and damped-only
 //! controllers lost data. The controller here ports those decision rules
 //! one-to-one; sim ticks map to wall-clock via the measured staleness.
+//!
+//! Full design, the reproducible simulation harness, the Byzantine-defence
+//! studies (verified coverage, partial liars), and a TLA+/TLC formal proof
+//! that concurrent shrinks can never drop a sector below the redundancy
+//! target — model-checked exhaustively over every reachable state for small
+//! networks, with the naive rule failing the same check — live at
+//! <https://github.com/ValiChord/polite-shrink> (offered upstream on
+//! issue #160).
 
 mod blocks;
 mod config;
