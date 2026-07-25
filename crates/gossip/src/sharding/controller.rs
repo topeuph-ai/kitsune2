@@ -213,6 +213,24 @@ impl K2Sharding {
                     if ctl.pending.take().is_some() {
                         ctl.shrink_acc = Duration::ZERO;
                         self.intents.remove(agent_id);
+                        if self.config.agentinfo_encoding {
+                            // The announcement was a narrowed arc claim, so
+                            // cancelling it means widening the claim back.
+                            // Without this the agent is left declaring less
+                            // than `target_level`, and the arc-match guard in
+                            // `tick_agent` then blocks every later decision —
+                            // including the growth this brake exists to allow.
+                            if let Some(agent) = local_agents
+                                .iter()
+                                .find(|a| a.agent() == agent_id)
+                            {
+                                let arc =
+                                    block_arc(ctl.home, ctl.declared_level);
+                                agent.set_tgt_storage_arc_hint(arc);
+                                agent.set_cur_storage_arc(arc);
+                                agent.invoke_cb();
+                            }
+                        }
                         tracing::info!(
                             agent = ?agent_id,
                             "sharding: peer loss detected, cancelling \
@@ -401,6 +419,28 @@ impl K2Sharding {
         };
 
         ctl.pending = Some(PendingShrink { execute_at, vacate });
+
+        if cfg.agentinfo_encoding {
+            // The announcement IS the arc claim: publish the reduced arc
+            // now and let the existing AgentInfo gossip carry it. No
+            // message is sent, and no intent is recorded — peers will read
+            // the narrowed claim and count us out, which is the
+            // conservative direction. `declared_level` deliberately still
+            // holds the pre-shrink level, so the arc-match guard in
+            // `tick_agent` blocks further decisions until this resolves.
+            let arc = block_arc(ctl.home, ctl.declared_level - 1);
+            agent.set_tgt_storage_arc_hint(arc);
+            agent.set_cur_storage_arc(arc);
+            agent.invoke_cb();
+            tracing::debug!(
+                agent = ?agent.agent(),
+                ?vacate,
+                ?wait,
+                "sharding: announcing shrink by narrowing the arc claim"
+            );
+            return;
+        }
+
         // Local sibling agents must see this intent too.
         self.intents
             .insert(agent.agent().clone(), ShrinkIntent { vacate, expires_at });
@@ -452,10 +492,15 @@ impl K2Sharding {
             ctl.grow_acc = Duration::ZERO;
             ctl.shrink_acc = Duration::ZERO;
             let arc = block_arc(ctl.home, ctl.declared_level);
-            agent.set_tgt_storage_arc_hint(arc);
-            agent.set_cur_storage_arc(arc);
-            // Re-sign and publish the shrunk declaration.
-            agent.invoke_cb();
+            // Under the AgentInfo encoding this arc was already published
+            // at announce time; re-publishing would double-count the
+            // gossip cost the encoding is being measured for.
+            if !self.config.agentinfo_encoding {
+                agent.set_tgt_storage_arc_hint(arc);
+                agent.set_cur_storage_arc(arc);
+                // Re-sign and publish the shrunk declaration.
+                agent.invoke_cb();
+            }
             tracing::info!(
                 agent = ?agent.agent(),
                 level = ctl.declared_level,
@@ -464,6 +509,14 @@ impl K2Sharding {
         } else {
             // Someone who outranks us is going, or the world changed.
             ctl.shrink_acc = Duration::ZERO;
+            if self.config.agentinfo_encoding {
+                // Stand down: re-publish the wider claim we never stopped
+                // holding, so peers route to us again.
+                let arc = block_arc(ctl.home, ctl.declared_level);
+                agent.set_tgt_storage_arc_hint(arc);
+                agent.set_cur_storage_arc(arc);
+                agent.invoke_cb();
+            }
             tracing::debug!(
                 agent = ?agent.agent(),
                 "sharding: shrink intent cancelled at re-check"

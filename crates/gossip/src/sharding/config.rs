@@ -91,6 +91,26 @@ pub struct K2ShardingConfig {
     /// Default: 300,000 (5m)
     #[cfg_attr(feature = "schema", schemars(default))]
     pub lag_ceiling_ms: u32,
+
+    /// Carry the vacate intent on the gossiped `AgentInfo` arc claim
+    /// instead of a dedicated `ShrinkIntent` message.
+    ///
+    /// When true, announcing a shrink means publishing the *reduced* arc
+    /// immediately and re-checking against what peers still declare; no
+    /// sharding message is sent or consumed. Peers cannot then distinguish
+    /// "announced but still holding" from "already gone", so the lower-id
+    /// tie-break has no input and is given up: the re-check simply
+    /// requires the target redundancy among current claimants. That is
+    /// safe (model-checked) but strictly more conservative — it stands
+    /// down more often and settles at a wider arc.
+    ///
+    /// Note that in kitsune2 the declared arc is also what a peer is asked
+    /// to serve, so during the wait this makes the vacated half
+    /// unreachable even though the ops are still held locally.
+    ///
+    /// Default: false
+    #[cfg_attr(feature = "schema", schemars(default))]
+    pub agentinfo_encoding: bool,
 }
 
 impl Default for K2ShardingConfig {
@@ -105,6 +125,7 @@ impl Default for K2ShardingConfig {
             intent_min_wait_ms: 10_000,
             lag_floor_ms: 1_000,
             lag_ceiling_ms: 300_000,
+            agentinfo_encoding: false,
         }
     }
 }
