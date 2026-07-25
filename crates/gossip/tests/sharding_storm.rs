@@ -88,6 +88,7 @@ async fn storm_does_not_orphan_sectors() {
         intent_min_wait_ms: 1_000,
         lag_floor_ms: 250,
         lag_ceiling_ms: 2_000,
+        agentinfo_encoding: false,
     });
 
     // Seed some data so gossip rounds have something to verify.
