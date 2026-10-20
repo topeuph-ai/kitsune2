@@ -70,12 +70,19 @@ struct RunStats {
     settle_secs: f64,
     /// Total declared sector-copies at the end, against 8 x the ring.
     final_copies: u32,
+    /// False if the network was still changing at the deadline (only
+    /// tolerated in the comparison, which records it).
+    settled: bool,
 }
 
 /// Build the network, let it shard down under a forced race, and assert
 /// safety, progress, and (if anyone waited) that waiters went on to
 /// execute.
-async fn race_run(patient_lowest: bool) -> RunStats {
+async fn race_run(
+    patient_lowest: bool,
+    withdraw: bool,
+    require_settle: bool,
+) -> RunStats {
     let events = events();
     events.lock().unwrap().clear();
 
@@ -103,6 +110,7 @@ async fn race_run(patient_lowest: bool) -> RunStats {
         lag_ceiling_ms: 2_000,
         agentinfo_encoding: false,
         patient_lowest,
+        withdraw_on_stand_down: withdraw,
     });
 
     let a = factory.new_instance().await;
@@ -131,7 +139,7 @@ async fn race_run(patient_lowest: bool) -> RunStats {
     let mut last = Vec::new();
     let mut stable_since = tokio::time::Instant::now();
     let deadline = tokio::time::Instant::now() + Duration::from_secs(300);
-    let settled = loop {
+    let (settled, did_settle) = loop {
         let now_agents = agents(&nodes).await;
         let cov = coverage(&now_agents);
         let min = *cov.iter().min().unwrap();
@@ -153,20 +161,27 @@ async fn race_run(patient_lowest: bool) -> RunStats {
             last = cov;
             stable_since = tokio::time::Instant::now();
         } else if executed && stable_since.elapsed() >= SETTLE {
-            break now_agents;
+            break (now_agents, true);
         }
-        assert!(
-            tokio::time::Instant::now() < deadline,
-            "network never settled after shrinking (executed any: \
-             {executed})"
-        );
+        if tokio::time::Instant::now() >= deadline {
+            assert!(
+                !require_settle,
+                "network never settled after shrinking (executed any: \
+                 {executed})"
+            );
+            break (now_agents, false);
+        }
         tokio::time::sleep(Duration::from_millis(50)).await;
     };
 
     assert_eq!(NUM_AGENTS as usize, settled.len());
 
     // Progress: nobody is left holding a shrink it could safely take.
-    let stuck = could_shrink(&settled, TARGET_REDUNDANCY);
+    let stuck = if did_settle {
+        could_shrink(&settled, TARGET_REDUNDANCY)
+    } else {
+        Vec::new()
+    };
     if !stuck.is_empty() {
         let log = events.lock().unwrap().clone();
         for id in &stuck {
@@ -191,6 +206,7 @@ async fn race_run(patient_lowest: bool) -> RunStats {
     let mut stats = RunStats {
         settle_secs: (stable_since - armed_at).as_secs_f64(),
         final_copies: coverage(&settled).iter().sum(),
+        settled: did_settle,
         ..Default::default()
     };
     let mut waited_then: HashMap<String, bool> = HashMap::new();
@@ -219,6 +235,13 @@ async fn race_run(patient_lowest: bool) -> RunStats {
         }
     }
     assert!(stats.executed >= 1, "no shrink executed");
+    // Remote intents must pass the sender check: if a peer's URL as seen
+    // by the transport ever differed from its declared URL, every remote
+    // intent would be silently dropped.
+    assert!(
+        !log.iter().any(|(_, m)| m == SENDER_MISMATCH),
+        "a remote intent arrived from a URL other than its agent's"
+    );
     for (agent, done) in &waited_then {
         assert!(done, "agent {agent} waited at re-check but never executed");
     }
@@ -233,7 +256,7 @@ async fn forced_race_patient_lowest_waits_and_stays_safe() {
     let _serial = SERIAL.lock().await;
     let mut all = Vec::new();
     for run in 1..=MAX_V6_RUNS {
-        let stats = race_run(true).await;
+        let stats = race_run(true, true, true).await;
         println!("V6 forced race, run {run}: {stats:?}");
         let waited = stats.waited > 0;
         all.push(stats);
@@ -253,7 +276,7 @@ async fn forced_race_patient_lowest_waits_and_stays_safe() {
 #[tokio::test(flavor = "multi_thread")]
 async fn forced_race_tiebreak_v3_stays_safe() {
     let _serial = SERIAL.lock().await;
-    let stats = race_run(false).await;
+    let stats = race_run(false, false, true).await;
     println!("V3 forced race: {stats:?}");
 }
 
@@ -270,10 +293,15 @@ async fn forced_race_compare_v3_v6() {
         .and_then(|v| v.parse().ok())
         .unwrap_or(5);
     for run in 1..=runs {
-        for (name, patient) in [("V3", false), ("V6", true)] {
-            let s = race_run(patient).await;
+        for (name, patient, withdraw) in [
+            ("V3", false, false),
+            ("V3+withdraw", false, true),
+            ("V6", true, false),
+            ("V6+withdraw", true, true),
+        ] {
+            let s = race_run(patient, withdraw, false).await;
             println!(
-                "compare,{name},{run},{},{},{},{},{},{},{},{:.1},{}",
+                "compare,{name},{run},{},{},{},{},{},{},{},{:.1},{},{}",
                 s.announced,
                 s.stood_down,
                 s.waited,
@@ -282,7 +310,8 @@ async fn forced_race_compare_v3_v6() {
                 s.grew_short,
                 s.grew_intents,
                 s.settle_secs,
-                s.final_copies
+                s.final_copies,
+                s.settled
             );
         }
     }

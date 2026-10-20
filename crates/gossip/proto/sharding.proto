@@ -19,11 +19,11 @@ message K2ShardingMessage {
 //
 // This is phase one of a two-phase shrink. The sender waits long enough
 // for the announcement to have propagated, then re-checks that the vacated
-// range would still meet the redundancy target with this agent (and any
-// competing intenders that outrank it) gone. Receivers use pending intents
-// in their own controllers: sectors covered by an announced vacate are
-// treated as already lost when deciding whether to grow, and competing
-// shrink intents are tie-broken by agent id (lowest proceeds).
+// range would still meet the redundancy target with this agent, and
+// competing intenders, gone. Receivers use pending intents in their own
+// controllers: sectors covered by an announced vacate are treated as
+// already lost when deciding whether to grow and when re-checking their
+// own shrinks.
 message K2ShardingShrinkIntentMessage {
   // The agent id of the intender.
   bytes agent_id = 1;
@@ -37,4 +37,9 @@ message K2ShardingShrinkIntentMessage {
   // Timestamp (microseconds since the UNIX epoch) after which this intent
   // is void and must be ignored, whether or not it was executed.
   int64 expires_at_us = 4;
+
+  // True to withdraw the sender's earlier intent with exactly this
+  // expiry: the sender stood down and keeps holding the range. Receivers
+  // drop that intent at once instead of letting it age out.
+  bool withdrawn = 5;
 }

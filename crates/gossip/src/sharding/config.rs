@@ -136,6 +136,25 @@ pub struct K2ShardingConfig {
     /// Default: true
     #[cfg_attr(feature = "schema", schemars(default))]
     pub patient_lowest: bool,
+
+    /// When an agent stands down at re-check, broadcast a withdrawal of
+    /// its intent so peers drop it at once instead of when it expires.
+    ///
+    /// Without it, a withdrawn intent keeps counting as an announced
+    /// vacate at peers until it expires, and growers treat announced
+    /// vacates as already gone: they grow to cover departures that will
+    /// never happen. The withdrawal names the exact intent (agent and
+    /// expiry) and is only honoured from the agent's own peer URL, so a
+    /// late or forged one cannot remove a newer or genuine intent.
+    ///
+    /// Safe because an agent that stood down really does keep holding
+    /// the range, so peers counting it as present again are right. This
+    /// also brings the code in line with the model checks, where a
+    /// stood-down intent is gone from the next view.
+    ///
+    /// Default: true
+    #[cfg_attr(feature = "schema", schemars(default))]
+    pub withdraw_on_stand_down: bool,
 }
 
 impl Default for K2ShardingConfig {
@@ -152,6 +171,7 @@ impl Default for K2ShardingConfig {
             lag_ceiling_ms: 300_000,
             agentinfo_encoding: false,
             patient_lowest: true,
+            withdraw_on_stand_down: true,
         }
     }
 }

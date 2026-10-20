@@ -40,6 +40,7 @@ mod tests {
                     vacate_start: 7 << 23,
                     vacate_end: (15 << 23) - 1,
                     expires_at_us: 1_234_567,
+                    withdrawn: false,
                 },
             )),
         };

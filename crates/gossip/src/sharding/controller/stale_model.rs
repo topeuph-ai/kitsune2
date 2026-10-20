@@ -153,6 +153,7 @@ impl World {
                             ShrinkIntent {
                                 vacate: VACATE,
                                 expires_at: far,
+                                from: None,
                             },
                         )
                     })

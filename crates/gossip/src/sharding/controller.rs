@@ -198,11 +198,26 @@ impl K2Sharding {
         // announcer actually declares (see retain_declared). Uses the
         // same peer snapshot as this tick's coverage, so intent and arc
         // are judged on one consistent view.
-        let declared_arcs: HashMap<AgentId, DhtArc> = peers
+        let declared_arcs: HashMap<AgentId, (DhtArc, Option<Url>)> = peers
             .iter()
             .filter(|p| !p.is_tombstone)
-            .map(|p| (p.agent.clone(), p.storage_arc))
+            .map(|p| (p.agent.clone(), (p.storage_arc, p.url.clone())))
             .collect();
+        let sender_mismatches = live_intents
+            .iter()
+            .filter(|(a, i)| {
+                i.from.is_some()
+                    && declared_arcs
+                        .get(a)
+                        .is_some_and(|(_, url)| *url != i.from)
+            })
+            .count();
+        if sender_mismatches > 0 {
+            tracing::debug!(
+                sender_mismatches,
+                "sharding: intents not from their agent's declared URL"
+            );
+        }
         retain_declared(&mut live_intents, &declared_arcs, &own_ids);
         let lag = self.lag_estimate(&peers, &gone, now).await;
 
@@ -513,9 +528,43 @@ impl K2Sharding {
         else {
             return;
         };
-        self.intents
-            .insert(agent.agent().clone(), ShrinkIntent { vacate, expires_at });
+        self.intents.insert(
+            agent.agent().clone(),
+            ShrinkIntent {
+                vacate,
+                expires_at,
+                from: None,
+            },
+        );
 
+        self.send_intent(agent, (vacate_start, vacate_end), expires_at, false)
+            .await;
+    }
+
+    /// Broadcast a withdrawal of this agent's intent with the given
+    /// expiry: it stood down and keeps holding the range.
+    async fn withdraw_intent(
+        &self,
+        agent: &DynLocalAgent,
+        vacate: (u32, u32),
+        expires_at: Timestamp,
+    ) {
+        let DhtArc::Arc(vacate_start, vacate_end) =
+            super::blocks::sectors_to_arc(vacate.0, vacate.1)
+        else {
+            return;
+        };
+        self.send_intent(agent, (vacate_start, vacate_end), expires_at, true)
+            .await;
+    }
+
+    async fn send_intent(
+        &self,
+        agent: &DynLocalAgent,
+        (vacate_start, vacate_end): (u32, u32),
+        expires_at: Timestamp,
+        withdrawn: bool,
+    ) {
         let msg = serialize_sharding_message(K2ShardingMessage {
             msg: Some(k2_sharding_message::Msg::ShrinkIntent(
                 K2ShardingShrinkIntentMessage {
@@ -523,6 +572,7 @@ impl K2Sharding {
                     vacate_start,
                     vacate_end,
                     expires_at_us: expires_at.as_micros(),
+                    withdrawn,
                 },
             )),
         });
@@ -616,6 +666,12 @@ impl K2Sharding {
         } else {
             // Someone who outranks us is going, or the world changed.
             ctl.shrink_acc = Duration::ZERO;
+            if self.config.withdraw_on_stand_down
+                && !self.config.agentinfo_encoding
+            {
+                self.withdraw_intent(agent, pending.vacate, pending.expires_at)
+                    .await;
+            }
             if self.config.agentinfo_encoding {
                 // Stand down: re-publish the wider claim we never stopped
                 // holding, so peers route to us again.
@@ -868,7 +924,7 @@ impl TxBaseHandler for K2Sharding {}
 impl TxModuleHandler for K2Sharding {
     fn recv_module_msg(
         &self,
-        _peer: Url,
+        peer: Url,
         space_id: SpaceId,
         module: String,
         data: bytes::Bytes,
@@ -880,6 +936,14 @@ impl TxModuleHandler for K2Sharding {
         match msg.msg {
             Some(k2_sharding_message::Msg::ShrinkIntent(intent)) => {
                 let expires_at = Timestamp::from_micros(intent.expires_at_us);
+                if intent.withdrawn {
+                    self.intents.withdraw(
+                        AgentId::from(intent.agent_id),
+                        Some(peer),
+                        expires_at,
+                    );
+                    return Ok(());
+                }
                 if expires_at <= Timestamp::now() {
                     return Ok(());
                 }
@@ -902,7 +966,11 @@ impl TxModuleHandler for K2Sharding {
                 }
                 self.intents.insert(
                     AgentId::from(intent.agent_id),
-                    ShrinkIntent { vacate, expires_at },
+                    ShrinkIntent {
+                        vacate,
+                        expires_at,
+                        from: Some(peer),
+                    },
                 );
             }
             None => (),
@@ -999,6 +1067,7 @@ mod tests {
         ShrinkIntent {
             vacate,
             expires_at: Timestamp::now() + Duration::from_secs(60),
+            from: None,
         }
     }
 

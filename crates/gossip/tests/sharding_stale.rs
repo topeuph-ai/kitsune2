@@ -60,7 +60,11 @@ struct RunStats {
     final_copies: u32,
 }
 
-async fn stale_run(patient_lowest: bool, wait: Duration) -> RunStats {
+async fn stale_run(
+    patient_lowest: bool,
+    wait: Duration,
+    withdraw: bool,
+) -> RunStats {
     let events = events();
     events.lock().unwrap().clear();
     set_sharding_view_delay(STALENESS);
@@ -91,6 +95,7 @@ async fn stale_run(patient_lowest: bool, wait: Duration) -> RunStats {
         lag_ceiling_ms: 500,
         agentinfo_encoding: false,
         patient_lowest,
+        withdraw_on_stand_down: withdraw,
     });
 
     let mut nodes = Vec::with_capacity(NUM_NODES);
@@ -166,12 +171,13 @@ async fn stale_run(patient_lowest: bool, wait: Duration) -> RunStats {
 }
 
 /// V6 with a wait of 1.5x the staleness never takes a sector below
-/// target, and still shards down.
+/// target, and still shards down: once without and once with intent
+/// withdrawal (the default), which must not weaken safety.
 #[tokio::test(flavor = "multi_thread")]
 async fn stale_views_patient_lowest_stays_safe() {
     let _serial = SERIAL.lock().await;
-    for run in 1..=2 {
-        let s = stale_run(true, WAIT_SAFE_FOR_V6).await;
+    for (run, withdraw) in [(1, false), (2, true)] {
+        let s = stale_run(true, WAIT_SAFE_FOR_V6, withdraw).await;
         println!("V6 stale views, run {run}: {s:?}");
         assert_eq!(
             0, s.samples_below,
@@ -198,12 +204,14 @@ async fn stale_views_compare() {
          announced,stood_down,waited,executed,grew,final_copies"
     );
     for run in 1..=runs {
-        for (arm, patient, wait) in [
-            ("V3", false, WAIT_SAFE_FOR_V6),
-            ("V6", true, WAIT_SAFE_FOR_V6),
-            ("V6-short-wait", true, WAIT_TOO_SHORT),
+        for (arm, patient, wait, withdraw) in [
+            ("V3", false, WAIT_SAFE_FOR_V6, false),
+            ("V3+withdraw", false, WAIT_SAFE_FOR_V6, true),
+            ("V6", true, WAIT_SAFE_FOR_V6, false),
+            ("V6+withdraw", true, WAIT_SAFE_FOR_V6, true),
+            ("V6-short-wait", true, WAIT_TOO_SHORT, false),
         ] {
-            let s = stale_run(patient, wait).await;
+            let s = stale_run(patient, wait, withdraw).await;
             println!(
                 "stale,{arm},{run},{},{},{},{},{},{},{},{},{}",
                 s.min_coverage,

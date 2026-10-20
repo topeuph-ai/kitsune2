@@ -102,6 +102,8 @@ async fn storm(patient_lowest: bool) {
         lag_ceiling_ms: 2_000,
         agentinfo_encoding: false,
         patient_lowest,
+        // The V3 arm keeps the original behaviour for comparison.
+        withdraw_on_stand_down: patient_lowest,
     });
 
     // Seed some data so gossip rounds have something to verify.
