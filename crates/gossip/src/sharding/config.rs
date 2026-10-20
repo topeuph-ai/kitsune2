@@ -112,8 +112,8 @@ pub struct K2ShardingConfig {
     #[cfg_attr(feature = "schema", schemars(default))]
     pub agentinfo_encoding: bool,
 
-    /// Use the "patient lowest" re-check (V6) instead of the lower-id
-    /// tie-break.
+    /// Use the "patient lowest" re-check (V6) rather than the lower-id
+    /// tie-break (V3).
     ///
     /// At re-check, *every* overlapping announced intender counts as
     /// already gone, so no decision ever relies on a peer that may itself
@@ -130,7 +130,10 @@ pub struct K2ShardingConfig {
     /// `agentinfo_encoding` is set: a narrowed arc claim cannot tell an
     /// intender from a peer that has already left.
     ///
-    /// Default: false
+    /// This is the recommended rule. Set to false for the original
+    /// lower-id tie-break (V3), kept for comparison.
+    ///
+    /// Default: true
     #[cfg_attr(feature = "schema", schemars(default))]
     pub patient_lowest: bool,
 }
@@ -148,7 +151,7 @@ impl Default for K2ShardingConfig {
             lag_floor_ms: 1_000,
             lag_ceiling_ms: 300_000,
             agentinfo_encoding: false,
-            patient_lowest: false,
+            patient_lowest: true,
         }
     }
 }

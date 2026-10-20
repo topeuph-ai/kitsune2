@@ -58,13 +58,15 @@ async fn declared_coverage(
 
 #[tokio::test(flavor = "multi_thread")]
 async fn storm_does_not_orphan_sectors() {
-    storm(false).await;
+    // The default, recommended re-check: patient lowest (V6).
+    storm(true).await;
 }
 
-/// The same storm under the patient-lowest (V6) re-check.
+/// The same storm under the original lower-id tie-break (V3), kept for
+/// comparison.
 #[tokio::test(flavor = "multi_thread")]
-async fn storm_does_not_orphan_sectors_patient_lowest() {
-    storm(true).await;
+async fn storm_does_not_orphan_sectors_tiebreak_v3() {
+    storm(false).await;
 }
 
 async fn storm(patient_lowest: bool) {

@@ -16,28 +16,40 @@
 //! 2. Wait long enough for the announcement to propagate (a multiple of
 //!    the measured gossip staleness).
 //! 3. Re-check that the vacated range keeps the redundancy target with
-//!    this agent gone, counting any *lower agent id* announced intenders
-//!    as already gone. The lowest conflicting intender proceeds; the
-//!    others observe the conflict and stand down.
+//!    this agent gone. Which announced intenders count as gone depends
+//!    on the rule (below).
+//!
+//! **Re-check rule.** The default is the *patient-lowest* rule (V6,
+//! [`K2ShardingConfig::patient_lowest`]), the recommended rule as of
+//! October 2026: every overlapping announced intender counts as already
+//! gone; if that fails only because of higher-id intenders, the lowest
+//! racer keeps its intent up and re-checks next interval instead of
+//! standing down; and nobody announces while a lower-id intent overlaps
+//! the half they would vacate. Setting `patient_lowest: false` restores
+//! the original lower-id tie-break (V3), which counts only lower-id
+//! intenders as gone. V3 is kept for comparison: under stale views a
+//! staggered cascade of announcements can break it (see below).
 //!
 //! Growers treat announced vacates as already gone, so a grower moves to
 //! fill a hole before it exists rather than after.
 //!
 //! Controller dynamics (hysteresis scaled to measured gossip staleness,
-//! grow readily / shrink reluctantly, the two-phase handoff, and the
-//! lowest-id tie-break) were selected by simulation across disruption
-//! scenarios and an adversarial search; the two-phase variant showed no
-//! sector loss in 1248 multi-seed runs where naive and damped-only
-//! controllers lost data. The controller here ports those decision rules
-//! one-to-one; sim ticks map to wall-clock via the measured staleness.
+//! grow readily / shrink reluctantly, the two-phase handoff) were
+//! selected by simulation across disruption scenarios and an adversarial
+//! search. The controller here ports those decision rules one-to-one;
+//! sim ticks map to wall-clock via the measured staleness.
 //!
-//! Full design, the reproducible simulation harness, the Byzantine-defence
-//! studies (verified coverage, partial liars), and a TLA+/TLC formal proof
-//! that concurrent shrinks can never drop a sector below the redundancy
-//! target — model-checked exhaustively over every reachable state for small
-//! networks, with the naive rule failing the same check — live at
-//! <https://github.com/ValiChord/polite-shrink> (offered upstream on
-//! issue #160).
+//! **What is and is not established.** The research lives at
+//! <https://github.com/ValiChord/polite-shrink>. Its TLA+ model gave the
+//! re-check an atomic, fresh view, which never exercises the tie-break.
+//! Exhaustive timed model checking with *stale* views
+//! (`spec/timed_check.py`, `REPORT_stale_views.md`, small networks,
+//! N <= 5) finds that V3 can drop a sector below target, and that V6 is
+//! safe with a wait of at least one gossip lag, provided deaths are
+//! noticed before anyone acts on a view still counting the dead peer,
+//! while still making progress and shrinking concurrently. No local rule
+//! can see a death that has not been detected yet. These are simulation
+//! and small-model results, not a proof for real networks.
 
 mod blocks;
 mod config;

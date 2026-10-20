@@ -59,8 +59,8 @@ struct PendingShrink {
 ///
 /// Runs one controller tick per configured interval over every local
 /// agent, and receives shrink-intent announcements from peers as a
-/// transport module handler. See the [module docs](super) for the
-/// decision rules.
+/// transport module handler. See the `sharding` module source docs and
+/// [`K2ShardingConfig`](crate::K2ShardingConfig) for the decision rules.
 #[derive(Debug)]
 pub struct K2Sharding {
     config: Arc<K2ShardingConfig>,
