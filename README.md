@@ -1,5 +1,7 @@
 # kitsune2
 
+> **This branch, `feat/sharding-v6`, adds dynamic sharding (polite shrink, V6) for research. To test it, see [SHARDING_V6.md](SHARDING_V6.md).**
+
 p2p / dht communication framework
 
 ## Testing the bootstrap server metrics exporter
