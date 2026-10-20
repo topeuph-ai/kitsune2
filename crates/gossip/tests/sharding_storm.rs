@@ -58,6 +58,16 @@ async fn declared_coverage(
 
 #[tokio::test(flavor = "multi_thread")]
 async fn storm_does_not_orphan_sectors() {
+    storm(false).await;
+}
+
+/// The same storm under the patient-lowest (V6) re-check.
+#[tokio::test(flavor = "multi_thread")]
+async fn storm_does_not_orphan_sectors_patient_lowest() {
+    storm(true).await;
+}
+
+async fn storm(patient_lowest: bool) {
     enable_tracing_with_default_level(tracing::Level::INFO);
 
     let factory = K2GossipFunctionalTestFactory::create(
@@ -89,6 +99,7 @@ async fn storm_does_not_orphan_sectors() {
         lag_floor_ms: 250,
         lag_ceiling_ms: 2_000,
         agentinfo_encoding: false,
+        patient_lowest,
     });
 
     // Seed some data so gossip rounds have something to verify.

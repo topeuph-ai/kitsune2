@@ -111,6 +111,28 @@ pub struct K2ShardingConfig {
     /// Default: false
     #[cfg_attr(feature = "schema", schemars(default))]
     pub agentinfo_encoding: bool,
+
+    /// Use the "patient lowest" re-check (V6) instead of the lower-id
+    /// tie-break.
+    ///
+    /// At re-check, *every* overlapping announced intender counts as
+    /// already gone, so no decision ever relies on a peer that may itself
+    /// be leaving; the tie-break alone can be broken by a staggered
+    /// cascade of announcements under stale views. Counting everyone
+    /// would stall identical intenders, so ordering by id decides only
+    /// *when* to act, never what to count: if the re-check fails, some
+    /// higher-id intender overlaps and no lower-id one does, this agent
+    /// keeps its intent up and re-checks next interval instead of standing
+    /// down; and no agent announces while a lower-id intent overlaps the
+    /// half it would vacate.
+    ///
+    /// Needs the explicit intent channel, so it is ignored when
+    /// `agentinfo_encoding` is set: a narrowed arc claim cannot tell an
+    /// intender from a peer that has already left.
+    ///
+    /// Default: false
+    #[cfg_attr(feature = "schema", schemars(default))]
+    pub patient_lowest: bool,
 }
 
 impl Default for K2ShardingConfig {
@@ -126,6 +148,7 @@ impl Default for K2ShardingConfig {
             lag_floor_ms: 1_000,
             lag_ceiling_ms: 300_000,
             agentinfo_encoding: false,
+            patient_lowest: false,
         }
     }
 }

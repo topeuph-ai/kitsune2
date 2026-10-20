@@ -49,6 +49,10 @@ struct PendingShrink {
     execute_at: Timestamp,
     /// Half-open sector range that would be vacated.
     vacate: (u32, u32),
+    /// When the announced intent expires at peers.
+    expires_at: Timestamp,
+    /// The announce-to-execute wait this intent was given.
+    wait: Duration,
 }
 
 /// The sharding module implementation.
@@ -307,7 +311,8 @@ impl K2Sharding {
         // intent is pending.
         if let Some(pending) = &ctl.pending {
             if now >= pending.execute_at {
-                self.execute_intent(agent, ctl, &cov, live_intents);
+                self.execute_intent(agent, ctl, &cov, live_intents, now)
+                    .await;
             }
             return;
         }
@@ -374,6 +379,15 @@ impl K2Sharding {
             // Safety first: growing wins over shrinking.
             self.start_grow(agent, ctl);
         } else if shrink_cond && ctl.shrink_acc >= shrink_need {
+            // Patient lowest: hold off while a lower id is racing us for
+            // the same sectors. The accumulator is kept, so we announce
+            // as soon as it clears.
+            if self.patient() {
+                let (vs, ve) = vacate_half(ctl.home, ctl.declared_level);
+                if lower_racer(live_intents, agent.agent(), (vs, ve)) {
+                    return;
+                }
+            }
             self.announce_shrink(agent, ctl, lag, now).await;
         }
     }
@@ -413,12 +427,19 @@ impl K2Sharding {
         let expires_at = execute_at + wait;
 
         let vacate = vacate_half(ctl.home, ctl.declared_level);
-        let vacate_arc = super::blocks::sectors_to_arc(vacate.0, vacate.1);
-        let DhtArc::Arc(vacate_start, vacate_end) = vacate_arc else {
+        if !matches!(
+            super::blocks::sectors_to_arc(vacate.0, vacate.1),
+            DhtArc::Arc(..)
+        ) {
             return;
-        };
+        }
 
-        ctl.pending = Some(PendingShrink { execute_at, vacate });
+        ctl.pending = Some(PendingShrink {
+            execute_at,
+            vacate,
+            expires_at,
+            wait,
+        });
 
         if cfg.agentinfo_encoding {
             // The announcement IS the arc claim: publish the reduced arc
@@ -441,16 +462,30 @@ impl K2Sharding {
             return;
         }
 
-        // Local sibling agents must see this intent too.
-        self.intents
-            .insert(agent.agent().clone(), ShrinkIntent { vacate, expires_at });
-
         tracing::debug!(
             agent = ?agent.agent(),
             ?vacate,
             ?wait,
             "sharding: announcing shrink intent"
         );
+        self.publish_intent(agent, vacate, expires_at).await;
+    }
+
+    /// Record a shrink intent locally (sibling agents must see it too) and
+    /// broadcast it. Re-publishing replaces the earlier intent at peers.
+    async fn publish_intent(
+        &self,
+        agent: &DynLocalAgent,
+        vacate: (u32, u32),
+        expires_at: Timestamp,
+    ) {
+        let DhtArc::Arc(vacate_start, vacate_end) =
+            super::blocks::sectors_to_arc(vacate.0, vacate.1)
+        else {
+            return;
+        };
+        self.intents
+            .insert(agent.agent().clone(), ShrinkIntent { vacate, expires_at });
 
         let msg = serialize_sharding_message(K2ShardingMessage {
             msg: Some(k2_sharding_message::Msg::ShrinkIntent(
@@ -465,28 +500,68 @@ impl K2Sharding {
         self.broadcast(msg).await;
     }
 
-    /// Phase two: re-check with fresher information, counting announced
-    /// intenders that outrank us (lower agent id) as already gone. If it
-    /// still holds, drop the vacated half; otherwise stand down.
-    fn execute_intent(
+    /// Whether the patient-lowest (V6) re-check is in force.
+    fn patient(&self) -> bool {
+        self.config.patient_lowest && !self.config.agentinfo_encoding
+    }
+
+    /// Phase two: re-check with fresher information. Under the default
+    /// rule, announced intenders that outrank us (lower agent id) count as
+    /// already gone; under patient lowest, every overlapping intender
+    /// does, and the lowest racer may wait rather than stand down. If the
+    /// check holds, drop the vacated half; otherwise stand down.
+    async fn execute_intent(
         &self,
         agent: &DynLocalAgent,
         ctl: &mut AgentControl,
         cov: &[u32],
         live_intents: &[(AgentId, ShrinkIntent)],
+        now: Timestamp,
     ) {
-        let Some(pending) = ctl.pending.take() else {
+        let Some(mut pending) = ctl.pending.take() else {
             return;
+        };
+
+        let r = self.config.target_redundancy;
+        let proceed = if self.patient() {
+            match patient_recheck(
+                cov,
+                live_intents,
+                agent.agent(),
+                pending.vacate,
+                r,
+            ) {
+                Recheck::Proceed => true,
+                Recheck::StandDown => false,
+                Recheck::Wait => {
+                    // Keep the intent up and look again next interval.
+                    // Peers must keep seeing it for as long as we may
+                    // still act on it, so refresh it well before expiry.
+                    pending.execute_at = now + self.config.check_interval();
+                    if pending.expires_at < pending.execute_at + pending.wait {
+                        pending.expires_at =
+                            pending.execute_at + pending.wait + pending.wait;
+                        self.publish_intent(
+                            agent,
+                            pending.vacate,
+                            pending.expires_at,
+                        )
+                        .await;
+                    }
+                    tracing::debug!(
+                        agent = ?agent.agent(),
+                        "sharding: lowest racer waiting at re-check"
+                    );
+                    ctl.pending = Some(pending);
+                    return;
+                }
+            }
+        } else {
+            shrink_recheck(cov, live_intents, agent.agent(), pending.vacate, r)
         };
         self.intents.remove(agent.agent());
 
-        if shrink_recheck(
-            cov,
-            live_intents,
-            agent.agent(),
-            pending.vacate,
-            self.config.target_redundancy,
-        ) {
+        if proceed {
             ctl.declared_level -= 1;
             ctl.target_level = ctl.declared_level;
             ctl.grow_acc = Duration::ZERO;
@@ -659,6 +734,74 @@ fn shrink_recheck(
     min_over(&eff, vacate.0, vacate.1) >= target_redundancy
 }
 
+/// Outcome of a patient-lowest re-check.
+#[derive(Debug, PartialEq, Eq)]
+enum Recheck {
+    /// Vacate now.
+    Proceed,
+    /// Keep the intent up and re-check next interval.
+    Wait,
+    /// Withdraw the intent.
+    StandDown,
+}
+
+/// Do half-open sector ranges overlap?
+fn overlaps(a: (u32, u32), b: (u32, u32)) -> bool {
+    a.0.max(b.0) < a.1.min(b.1)
+}
+
+/// Is an intender with a lower id than ours racing us for any sector of
+/// `vacate`?
+fn lower_racer(
+    live_intents: &[(AgentId, ShrinkIntent)],
+    own_id: &AgentId,
+    vacate: (u32, u32),
+) -> bool {
+    live_intents
+        .iter()
+        .any(|(id, i)| id < own_id && overlaps(i.vacate, vacate))
+}
+
+/// The patient-lowest (V6) re-check.
+///
+/// Every announced intender overlapping our vacate range counts as
+/// already gone — including higher ids, which the default rule ignores.
+/// No decision then relies on a peer that may itself be leaving, which is
+/// what keeps it safe when announcements are staggered against stale
+/// views and when a peer dies mid-race; the default rule's reliance on
+/// higher-id intenders "counting us and deferring" is exactly what a
+/// staggered cascade breaks.
+///
+/// Counting everyone would let identical intenders cancel each other
+/// forever, so the id order decides only who waits: if the check fails,
+/// a higher-id intender overlaps and no lower-id one does, we are the
+/// lowest racer and wait. The higher racers fail their own checks, stand
+/// down, and (by the announce-time yield) stay quiet until we are done.
+fn patient_recheck(
+    cov: &[u32],
+    live_intents: &[(AgentId, ShrinkIntent)],
+    own_id: &AgentId,
+    vacate: (u32, u32),
+    target_redundancy: u32,
+) -> Recheck {
+    let mut eff = cov.to_vec();
+    let mut higher = false;
+    for (id, intent) in live_intents {
+        if id == own_id || !overlaps(intent.vacate, vacate) {
+            continue;
+        }
+        subtract_sectors(&mut eff, intent.vacate.0, intent.vacate.1);
+        higher |= id > own_id;
+    }
+    if min_over(&eff, vacate.0, vacate.1) >= target_redundancy {
+        Recheck::Proceed
+    } else if higher && !lower_racer(live_intents, own_id, vacate) {
+        Recheck::Wait
+    } else {
+        Recheck::StandDown
+    }
+}
+
 /// Add one copy to every sector fully covered by a (sector-aligned)
 /// current storage arc.
 fn add_cur_arc(cov: &mut [u32], arc: &DhtArc) {
@@ -818,5 +961,155 @@ mod tests {
         // Overlaps sectors 4..8 of my 0..8 vacate range.
         let intents = vec![(low, intent((4, 12)))];
         assert!(!shrink_recheck(&cov, &intents, &me, (0, 8), r));
+    }
+
+    /// The staggered cascade that breaks the default rule, reduced to one
+    /// decision: the lowest racer sees a higher-id intender still holding
+    /// and the default rule lets it go counting that intender as staying.
+    /// If the higher one then leaves too (it was the lowest in *its* stale
+    /// view), the range drops to R - 1. Patient lowest counts the higher
+    /// intender as gone and does not go.
+    #[test]
+    fn patient_counts_higher_intenders_as_gone() {
+        let r = 3;
+        let cov = vec![r; NUM_SECTORS as usize];
+        let vacate = (0, 8);
+        let low = agent(b"aaa");
+        let high = agent(b"zzz");
+        let intents = vec![
+            (low.clone(), intent(vacate)),
+            (high.clone(), intent(vacate)),
+        ];
+        assert!(shrink_recheck(&cov, &intents, &low, vacate, r));
+        assert_ne!(
+            patient_recheck(&cov, &intents, &low, vacate, r),
+            Recheck::Proceed
+        );
+    }
+
+    /// In the contested range the lowest racer waits instead of
+    /// cancelling (cancelling everyone is the stall that counting every
+    /// intender alone suffers), and the higher racer stands down.
+    #[test]
+    fn patient_lowest_waits_highest_stands_down() {
+        let r = 3;
+        let cov = vec![r; NUM_SECTORS as usize];
+        let vacate = (0, 8);
+        let low = agent(b"aaa");
+        let high = agent(b"zzz");
+        let intents = vec![
+            (low.clone(), intent(vacate)),
+            (high.clone(), intent(vacate)),
+        ];
+        assert_eq!(
+            patient_recheck(&cov, &intents, &low, vacate, r),
+            Recheck::Wait
+        );
+        assert_eq!(
+            patient_recheck(&cov, &intents, &high, vacate, r),
+            Recheck::StandDown
+        );
+    }
+
+    /// Once the higher racer's intent has cleared, the waiting lowest
+    /// racer re-checks with nobody left to discount and proceeds.
+    #[test]
+    fn patient_lowest_proceeds_once_racers_clear() {
+        let r = 3;
+        let cov = vec![r; NUM_SECTORS as usize];
+        let vacate = (0, 8);
+        let low = agent(b"aaa");
+        let intents = vec![(low.clone(), intent(vacate))];
+        assert_eq!(
+            patient_recheck(&cov, &intents, &low, vacate, r),
+            Recheck::Proceed
+        );
+    }
+
+    /// A middle racer — lower ids and higher ids both overlapping —
+    /// stands down rather than waiting: only the lowest may wait.
+    #[test]
+    fn patient_middle_racer_stands_down() {
+        let r = 3;
+        let cov = vec![r; NUM_SECTORS as usize];
+        let vacate = (0, 8);
+        let intents = vec![
+            (agent(b"aaa"), intent(vacate)),
+            (agent(b"mmm"), intent(vacate)),
+            (agent(b"zzz"), intent(vacate)),
+        ];
+        assert_eq!(
+            patient_recheck(&cov, &intents, &agent(b"mmm"), vacate, r),
+            Recheck::StandDown
+        );
+    }
+
+    /// With a wide margin every racer clears the count at once: patient
+    /// lowest stays concurrent and does not serialise shrinks.
+    #[test]
+    fn patient_rich_range_lets_all_racers_proceed() {
+        let r = 3;
+        let cov = vec![r + 2; NUM_SECTORS as usize];
+        let vacate = (0, 8);
+        let ids = [agent(b"aaa"), agent(b"mmm"), agent(b"zzz")];
+        let intents: Vec<_> =
+            ids.iter().map(|a| (a.clone(), intent(vacate))).collect();
+        for me in &ids {
+            assert_eq!(
+                patient_recheck(&cov, &intents, me, vacate, r),
+                Recheck::Proceed
+            );
+        }
+    }
+
+    /// No racers but too little coverage (say a peer died): stand down,
+    /// do not wait.
+    #[test]
+    fn patient_short_range_without_racers_stands_down() {
+        let r = 3;
+        let cov = vec![r - 1; NUM_SECTORS as usize];
+        let me = agent(b"mmm");
+        let intents = vec![(me.clone(), intent((0, 8)))];
+        assert_eq!(
+            patient_recheck(&cov, &intents, &me, (0, 8), r),
+            Recheck::StandDown
+        );
+    }
+
+    /// Disjoint intents, from either side of us in id order, neither
+    /// count nor make us wait.
+    #[test]
+    fn patient_ignores_disjoint_intents() {
+        let r = 3;
+        let cov = vec![r; NUM_SECTORS as usize];
+        let me = agent(b"mmm");
+        let intents = vec![
+            (agent(b"aaa"), intent((100, 108))),
+            (agent(b"zzz"), intent((200, 208))),
+        ];
+        assert_eq!(
+            patient_recheck(&cov, &intents, &me, (0, 8), r),
+            Recheck::Proceed
+        );
+        assert!(!lower_racer(&intents, &me, (0, 8)));
+    }
+
+    /// The announce-time yield: a lower-id intent overlapping the half we
+    /// would vacate holds us back; a higher-id one, or our own, does not.
+    #[test]
+    fn yield_only_to_overlapping_lower_ids() {
+        let me = agent(b"mmm");
+        let vacate = (0, 8);
+        assert!(lower_racer(
+            &[(agent(b"aaa"), intent((4, 12)))],
+            &me,
+            vacate
+        ));
+        assert!(!lower_racer(
+            &[(agent(b"zzz"), intent(vacate))],
+            &me,
+            vacate
+        ));
+        assert!(!lower_racer(&[(me.clone(), intent(vacate))], &me, vacate));
     }
 }
