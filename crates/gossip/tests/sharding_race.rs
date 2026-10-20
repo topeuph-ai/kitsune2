@@ -31,24 +31,16 @@
 //! wait is observed, asserting safety and progress on every run.
 #![cfg(feature = "sharding")]
 
-use kitsune2_api::{AgentInfoSigned, DhtArc, Timestamp};
-use kitsune2_core::factories::MemoryOp;
-use kitsune2_dht::SECTOR_SIZE;
-use kitsune2_gossip::harness::{
-    K2GossipFunctionalTestFactory, K2GossipFunctionalTestHarness,
-    MemoryOpRecord,
-};
+mod common;
+
+use common::*;
+use kitsune2_api::{AgentInfoSigned, DhtArc};
+use kitsune2_gossip::harness::K2GossipFunctionalTestFactory;
 use kitsune2_gossip::{K2GossipConfig, K2ShardingConfig};
-use kitsune2_test_utils::random_bytes;
 use kitsune2_test_utils::space::TEST_SPACE_ID;
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::Arc;
 use std::time::Duration;
-use tracing_subscriber::Layer;
-use tracing_subscriber::layer::SubscriberExt;
-use tracing_subscriber::util::SubscriberInitExt;
-
-const NUM_SECTORS: u32 = u32::MAX / SECTOR_SIZE + 1;
 const AGENTS_ON_A: usize = 6;
 const AGENTS_ON_B: usize = 2;
 const NUM_AGENTS: u32 = (AGENTS_ON_A + AGENTS_ON_B) as u32;
@@ -60,135 +52,6 @@ const MAX_V6_RUNS: usize = 6;
 /// so an agent that could still shrink has had time to.
 const SETTLE: Duration = Duration::from_secs(15);
 
-const ANNOUNCED: &str = "sharding: announcing shrink intent";
-const WAITED: &str = "sharding: lowest racer waiting at re-check";
-const EXECUTED: &str = "sharding: executed polite shrink";
-const STOOD_DOWN: &str = "sharding: shrink intent cancelled at re-check";
-const GREW: &str = "sharding: growing target arc";
-
-/// Sharding-module log events, `(agent, message)`, in arrival order.
-type Events = Arc<Mutex<Vec<(String, String)>>>;
-
-/// Install (once per test binary) a subscriber that records the
-/// sharding module's events, and return the shared record.
-fn events() -> Events {
-    static EVENTS: OnceLock<Events> = OnceLock::new();
-    EVENTS
-        .get_or_init(|| {
-            let events: Events = Arc::default();
-            let layer = Recorder(events.clone()).with_filter(
-                tracing_subscriber::filter::filter_fn(|m| {
-                    m.target().starts_with("kitsune2_gossip::sharding")
-                }),
-            );
-            tracing_subscriber::registry().with(layer).init();
-            events
-        })
-        .clone()
-}
-
-struct Recorder(Events);
-
-impl<S: tracing::Subscriber> Layer<S> for Recorder {
-    fn on_event(
-        &self,
-        event: &tracing::Event<'_>,
-        _ctx: tracing_subscriber::layer::Context<'_, S>,
-    ) {
-        #[derive(Default)]
-        struct Fields {
-            agent: String,
-            message: String,
-        }
-        impl tracing::field::Visit for Fields {
-            fn record_debug(
-                &mut self,
-                field: &tracing::field::Field,
-                value: &dyn std::fmt::Debug,
-            ) {
-                match field.name() {
-                    "agent" => self.agent = format!("{value:?}"),
-                    "message" => self.message = format!("{value:?}"),
-                    _ => {}
-                }
-            }
-        }
-        let mut f = Fields::default();
-        event.record(&mut f);
-        self.0.lock().unwrap().push((f.agent, f.message));
-    }
-}
-
-/// Tests in this binary share the global event record; run one at a time.
-static SERIAL: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
-
-/// One agent's declared arc as a half-open sector range.
-fn sectors(arc: DhtArc) -> Option<(u32, u32)> {
-    match arc {
-        DhtArc::Empty => None,
-        DhtArc::Arc(s, e) if s <= e => {
-            Some((s / SECTOR_SIZE, e / SECTOR_SIZE + 1))
-        }
-        // Quantised blocks never wrap; the full ring is FULL.
-        DhtArc::Arc(..) => Some((0, NUM_SECTORS)),
-    }
-}
-
-/// One local agent: (id, home sector, declared sector range).
-type AgentView = (String, u32, Option<(u32, u32)>);
-
-/// Every local agent's view.
-async fn agents(nodes: &[&K2GossipFunctionalTestHarness]) -> Vec<AgentView> {
-    let mut out = Vec::new();
-    for node in nodes {
-        for agent in node.space.local_agent_store().get_all().await.unwrap() {
-            out.push((
-                format!("{:?}", agent.agent()),
-                agent.agent().loc() / SECTOR_SIZE,
-                sectors(agent.get_cur_storage_arc()),
-            ));
-        }
-    }
-    out
-}
-
-fn coverage(agents: &[AgentView]) -> Vec<u32> {
-    let mut cov = vec![0u32; NUM_SECTORS as usize];
-    for (_, _, range) in agents {
-        if let Some((s, e)) = range {
-            for c in &mut cov[*s as usize..*e as usize] {
-                *c += 1;
-            }
-        }
-    }
-    cov
-}
-
-/// The agents that could still take a safe shrink: the half of their
-/// block not containing home keeps more than the target without them —
-/// exactly the controller's shrink condition.
-fn could_shrink(agents: &[AgentView]) -> Vec<String> {
-    let cov = coverage(agents);
-    let mut out = Vec::new();
-    for (id, home, range) in agents {
-        let Some((s, e)) = *range else { continue };
-        if e - s < 2 {
-            continue;
-        }
-        let mid = s + (e - s) / 2;
-        let (vs, ve) = if *home < mid { (mid, e) } else { (s, mid) };
-        let without_me = cov[vs as usize..ve as usize]
-            .iter()
-            .map(|c| c - 1)
-            .min()
-            .unwrap();
-        if without_me > TARGET_REDUNDANCY {
-            out.push(id.clone());
-        }
-    }
-    out
-}
-
 #[derive(Debug, Default)]
 struct RunStats {
     announced: usize,
@@ -197,6 +60,11 @@ struct RunStats {
     stood_down: usize,
     /// Grow decisions after every sector first reached the target.
     grew: usize,
+    /// ... of which the sibling half was short on declared coverage.
+    grew_short: usize,
+    /// ... of which only announced (not yet executed) vacates made it
+    /// look short.
+    grew_intents: usize,
     /// Seconds from every sector first reaching the target to the last
     /// change in declared coverage.
     settle_secs: f64,
@@ -238,22 +106,7 @@ async fn race_run(patient_lowest: bool) -> RunStats {
     });
 
     let a = factory.new_instance().await;
-    {
-        let mut op_store = a.op_store.write().await;
-        for _ in 0..16 {
-            let op = MemoryOp::new(Timestamp::now(), random_bytes(512));
-            op_store.op_list.insert(
-                op.compute_op_id(),
-                MemoryOpRecord {
-                    op_id: op.compute_op_id(),
-                    op_data: op.op_data,
-                    created_at: op.created_at,
-                    stored_at: Timestamp::now(),
-                    processed: false,
-                },
-            );
-        }
-    }
+    seed_ops(&a).await;
     let b = factory.new_instance().await;
 
     let mut infos_a: Vec<Arc<AgentInfoSigned>> = Vec::new();
@@ -313,7 +166,7 @@ async fn race_run(patient_lowest: bool) -> RunStats {
     assert_eq!(NUM_AGENTS as usize, settled.len());
 
     // Progress: nobody is left holding a shrink it could safely take.
-    let stuck = could_shrink(&settled);
+    let stuck = could_shrink(&settled, TARGET_REDUNDANCY);
     if !stuck.is_empty() {
         let log = events.lock().unwrap().clone();
         for id in &stuck {
@@ -342,7 +195,8 @@ async fn race_run(patient_lowest: bool) -> RunStats {
     };
     let mut waited_then: HashMap<String, bool> = HashMap::new();
     for (i, (agent, msg)) in log.iter().enumerate() {
-        if !ours.contains(agent) || (msg == GREW && i < armed_log_len) {
+        let grow_msg = msg == GREW || msg == GREW_SHORT || msg == GREW_INTENTS;
+        if !ours.contains(agent) || (grow_msg && i < armed_log_len) {
             continue;
         }
         match msg.as_str() {
@@ -359,6 +213,8 @@ async fn race_run(patient_lowest: bool) -> RunStats {
             }
             STOOD_DOWN => stats.stood_down += 1,
             GREW => stats.grew += 1,
+            GREW_SHORT => stats.grew_short += 1,
+            GREW_INTENTS => stats.grew_intents += 1,
             _ => {}
         }
     }
@@ -417,12 +273,14 @@ async fn forced_race_compare_v3_v6() {
         for (name, patient) in [("V3", false), ("V6", true)] {
             let s = race_run(patient).await;
             println!(
-                "compare,{name},{run},{},{},{},{},{},{:.1},{}",
+                "compare,{name},{run},{},{},{},{},{},{},{},{:.1},{}",
                 s.announced,
                 s.stood_down,
                 s.waited,
                 s.executed,
                 s.grew,
+                s.grew_short,
+                s.grew_intents,
                 s.settle_secs,
                 s.final_copies
             );

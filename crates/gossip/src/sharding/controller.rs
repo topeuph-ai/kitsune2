@@ -74,6 +74,9 @@ pub struct K2Sharding {
     /// Peers seen as gone (unresponsive or tombstoned) last tick, to
     /// detect fresh departures.
     last_gone: std::sync::Mutex<HashSet<AgentId>>,
+    /// Test-only artificial staleness (see [`view_delay`]).
+    #[cfg(any(test, feature = "test-utils"))]
+    view_delay: view_delay::ViewDelay,
     _check_task: OnceLock<DropAbortHandle>,
 }
 
@@ -97,6 +100,8 @@ impl K2Sharding {
             intents: IntentTable::default(),
             states: Mutex::new(HashMap::new()),
             last_gone: std::sync::Mutex::new(HashSet::new()),
+            #[cfg(any(test, feature = "test-utils"))]
+            view_delay: Default::default(),
             _check_task: OnceLock::new(),
         });
 
@@ -142,6 +147,13 @@ impl K2Sharding {
         }
         let peers = self.peer_store.get_all().await?;
         let now = Timestamp::now();
+        let live_intents = self.intents.live(now);
+        // Tests can make this node act on a view of the peer store and
+        // the intent table that is a fixed time old, both from the same
+        // instant, to exercise the stale-view race on a fast transport.
+        #[cfg(any(test, feature = "test-utils"))]
+        let (peers, live_intents) =
+            self.view_delay.apply(now, peers, live_intents);
 
         let own_ids = local_agents
             .iter()
@@ -181,7 +193,7 @@ impl K2Sharding {
             .count()
             + local_agents.len();
 
-        let mut live_intents = self.intents.live(now);
+        let mut live_intents = live_intents;
         // Range-validation: only count an intent over sectors its
         // announcer actually declares (see retain_declared). Uses the
         // same peer snapshot as this tick's coverage, so intent and arc
@@ -338,6 +350,10 @@ impl K2Sharding {
         // Grow check: would the sibling half be under-covered? Announced
         // vacates count as already gone, so we move before the hole opens.
         let mut grow_cond = false;
+        // Whether the sibling half is short on declared coverage alone,
+        // before announced vacates are subtracted. Only used to label the
+        // grow decision in the logs.
+        let mut grow_short_without_intents = false;
         if ctl.declared_level < MAX_LEVEL {
             let mut eff = cov.clone();
             for (id, intent) in live_intents {
@@ -351,6 +367,8 @@ impl K2Sharding {
             }
             let (ws, we) = sibling_half(ctl.home, ctl.declared_level);
             grow_cond = min_over(&eff, ws, we) < cfg.target_redundancy;
+            grow_short_without_intents =
+                min_over(&cov, ws, we) < cfg.target_redundancy;
         }
 
         // Shrink check: does the half we would drop stay strictly above
@@ -377,6 +395,17 @@ impl K2Sharding {
 
         if grow_cond && ctl.grow_acc >= grow_need {
             // Safety first: growing wins over shrinking.
+            if grow_short_without_intents {
+                tracing::debug!(
+                    agent = ?agent.agent(),
+                    "sharding: grow cause: sibling half short"
+                );
+            } else {
+                tracing::debug!(
+                    agent = ?agent.agent(),
+                    "sharding: grow cause: announced vacates only"
+                );
+            }
             self.start_grow(agent, ctl);
         } else if shrink_cond && ctl.shrink_acc >= shrink_need {
             // Patient lowest: hold off while a lower id is racing us for
@@ -884,6 +913,78 @@ impl TxModuleHandler for K2Sharding {
 
 #[cfg(test)]
 mod stale_model;
+
+#[cfg(any(test, feature = "test-utils"))]
+pub(crate) mod view_delay {
+    //! Test-only artificial staleness.
+    //!
+    //! On the in-memory transport gossip is near instant, so every node
+    //! acts on a fresh view and the stale-view shrink race cannot occur.
+    //! With a delay set, each controller tick acts on the peer-store and
+    //! intent-table snapshot taken `delay` ago (both from the same
+    //! instant, so the view is old but self-consistent), with intents
+    //! that have since expired dropped. The node's own controller state
+    //! and its sibling local agents' arcs stay fresh. Process-wide: every
+    //! sharding instance in the process sees the same delay.
+
+    use super::*;
+    use std::collections::VecDeque;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static DELAY_MS: AtomicU64 = AtomicU64::new(0);
+
+    /// Set the artificial view delay for every sharding instance in
+    /// this process. Zero turns it off.
+    pub(crate) fn set(delay: Duration) {
+        DELAY_MS.store(delay.as_millis() as u64, Ordering::Relaxed);
+    }
+
+    type Snapshot = (
+        Timestamp,
+        Vec<Arc<AgentInfoSigned>>,
+        Vec<(AgentId, ShrinkIntent)>,
+    );
+
+    #[derive(Debug, Default)]
+    pub(crate) struct ViewDelay {
+        history: std::sync::Mutex<VecDeque<Snapshot>>,
+    }
+
+    impl ViewDelay {
+        pub(crate) fn apply(
+            &self,
+            now: Timestamp,
+            peers: Vec<Arc<AgentInfoSigned>>,
+            intents: Vec<(AgentId, ShrinkIntent)>,
+        ) -> (Vec<Arc<AgentInfoSigned>>, Vec<(AgentId, ShrinkIntent)>) {
+            let delay = Duration::from_millis(DELAY_MS.load(Ordering::Relaxed));
+            let mut history = self.history.lock().expect("poisoned");
+            if delay.is_zero() {
+                history.clear();
+                return (peers, intents);
+            }
+            history.push_back((now, peers, intents));
+            let Ok(cutoff) = now - delay else {
+                return history
+                    .back()
+                    .map(|(_, p, i)| (p.clone(), i.clone()))
+                    .expect("just pushed");
+            };
+            // Keep the newest snapshot at or before the cutoff at the
+            // front; until there is one, the oldest we have is used.
+            while history.len() >= 2 && history[1].0 <= cutoff {
+                history.pop_front();
+            }
+            let (_, p, i) = &history[0];
+            let live = i
+                .iter()
+                .filter(|(_, intent)| intent.expires_at > now)
+                .cloned()
+                .collect();
+            (p.clone(), live)
+        }
+    }
+}
 
 #[cfg(test)]
 mod tests {

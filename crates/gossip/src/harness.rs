@@ -551,3 +551,11 @@ impl K2GossipFunctionalTestFactory {
         }
     }
 }
+
+/// Make every sharding controller in this process act on a view of the
+/// network that is `delay` old (zero turns it off), to exercise the
+/// stale-view shrink race on the near-instant in-memory transport.
+#[cfg(feature = "sharding")]
+pub fn set_sharding_view_delay(delay: std::time::Duration) {
+    crate::sharding::view_delay_set(delay);
+}
