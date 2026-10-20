@@ -392,3 +392,41 @@ fn v6_safe_with_prompt_death_large() {
     let v3 = World::new(4, 2, 2, 5, Rule::TieBreak, 0).check(true);
     assert!(v3.1 > 0, "V3 should fail some schedule");
 }
+
+/// Six nodes, every schedule, no deaths: V6 safe at a 1x-lag wait and
+/// always makes progress; V3 counted for comparison. Slow; run with
+/// `cargo test --release -- --ignored --nocapture`.
+#[test]
+#[ignore = "slow: six nodes; run with --release --ignored"]
+fn v6_six_nodes_every_schedule() {
+    for (r, l, d) in [(1, 2, 2), (2, 2, 2), (3, 2, 2)] {
+        let v6 = World::new(6, r, l, d, Rule::Patient, 0);
+        let (n, bad) = v6.check(false);
+        let mut stalls = 0u64;
+        v6.for_each_schedule(false, |ann, _, o| {
+            if ann.iter().any(Option::is_some) && o.departed == 0 {
+                stalls += 1;
+            }
+        });
+        let v3 = World::new(6, r, l, d, Rule::TieBreak, 0).check(false);
+        println!(
+            "N=6 R={r} L={l} D={d}: V6 {bad} violations, {stalls} stalls in {n} schedules; V3 {} violations",
+            v3.1
+        );
+        assert_eq!((0, 0), (bad, stalls));
+    }
+}
+
+/// Six nodes, every schedule, one death at any tick, detected at once:
+/// V6 safe. Very slow; run with `--release --ignored --nocapture`.
+#[test]
+#[ignore = "very slow: six nodes with deaths; run with --release --ignored"]
+fn v6_six_nodes_with_prompt_death() {
+    let (n, bad) = World::new(6, 2, 2, 2, Rule::Patient, 0).check(true);
+    let v3 = World::new(6, 2, 2, 2, Rule::TieBreak, 0).check(true);
+    println!(
+        "N=6 R=2 L=2 D=2 with a death: V6 {bad} violations in {n} schedules; V3 {} violations",
+        v3.1
+    );
+    assert_eq!(0, bad);
+}
