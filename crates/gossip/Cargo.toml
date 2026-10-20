@@ -41,6 +41,7 @@ kitsune2_dht = { workspace = true, features = ["mockall"] }
 
 tokio = { workspace = true, features = ["rt-multi-thread", "test-util"] }
 base64 = { workspace = true }
+tracing-subscriber = { workspace = true }
 
 [features]
 sharding = []

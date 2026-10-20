@@ -538,9 +538,12 @@ impl K2Sharding {
                     // Peers must keep seeing it for as long as we may
                     // still act on it, so refresh it well before expiry.
                     pending.execute_at = now + self.config.check_interval();
-                    if pending.expires_at < pending.execute_at + pending.wait {
-                        pending.expires_at =
-                            pending.execute_at + pending.wait + pending.wait;
+                    if let Some(expires_at) = refreshed_expiry(
+                        pending.expires_at,
+                        pending.execute_at,
+                        pending.wait,
+                    ) {
+                        pending.expires_at = expires_at;
                         self.publish_intent(
                             agent,
                             pending.vacate,
@@ -734,6 +737,20 @@ fn shrink_recheck(
     min_over(&eff, vacate.0, vacate.1) >= target_redundancy
 }
 
+/// While the lowest racer waits, its intent must stay live at peers
+/// through its next re-check and a grace period after it, as at first
+/// announcement (`expires_at = execute_at + wait`); otherwise a peer
+/// could stop counting it as gone while it may still leave. Returns the
+/// new expiry when a refresh is due, extending by two waits so the
+/// re-broadcast happens about once per wait rather than every interval.
+fn refreshed_expiry(
+    expires_at: Timestamp,
+    next_check: Timestamp,
+    wait: Duration,
+) -> Option<Timestamp> {
+    (expires_at < next_check + wait).then(|| next_check + wait + wait)
+}
+
 /// Outcome of a patient-lowest re-check.
 #[derive(Debug, PartialEq, Eq)]
 enum Recheck {
@@ -864,6 +881,9 @@ impl TxModuleHandler for K2Sharding {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod stale_model;
 
 #[cfg(test)]
 mod tests {
@@ -1092,6 +1112,49 @@ mod tests {
             Recheck::Proceed
         );
         assert!(!lower_racer(&intents, &me, (0, 8)));
+    }
+
+    /// However long the lowest racer waits, its intent never lapses at
+    /// peers before its next re-check plus a grace period, and it is
+    /// re-broadcast about once per wait, not once per check interval.
+    #[test]
+    fn waiting_intent_stays_live_and_refreshes_sparingly() {
+        for (interval_ms, wait_ms) in
+            [(100, 1_000), (5_000, 10_000), (900, 1_000), (3_000, 1_000)]
+        {
+            let interval = Duration::from_millis(interval_ms);
+            let wait = Duration::from_millis(wait_ms);
+            let start = Timestamp::now();
+            let mut now = start + wait;
+            let mut expires_at = now + wait;
+            let mut refreshes = 0u64;
+            let steps = 1_000u64;
+            for _ in 0..steps {
+                let next_check = now + interval;
+                if let Some(e) = refreshed_expiry(expires_at, next_check, wait)
+                {
+                    expires_at = e;
+                    refreshes += 1;
+                }
+                assert!(
+                    expires_at >= next_check + wait,
+                    "intent would lapse (interval {interval_ms} ms,                      wait {wait_ms} ms)"
+                );
+                now = next_check;
+            }
+            // At most one refresh per wait of waiting; when the interval
+            // is longer than the wait, one per re-check.
+            let waited_ms = steps * interval_ms;
+            let bound = if interval_ms <= wait_ms {
+                waited_ms / wait_ms + 1
+            } else {
+                steps
+            };
+            assert!(
+                refreshes <= bound,
+                "{refreshes} refreshes over {waited_ms} ms of waiting"
+            );
+        }
     }
 
     /// The announce-time yield: a lower-id intent overlapping the half we
