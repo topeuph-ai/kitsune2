@@ -559,3 +559,13 @@ impl K2GossipFunctionalTestFactory {
 pub fn set_sharding_view_delay(delay: std::time::Duration) {
     crate::sharding::view_delay_set(delay);
 }
+
+/// Dictate when each agent may announce a shrink: once, not before its
+/// scheduled time; unlisted agents never announce. `None` restores normal
+/// behaviour. Process-wide, for forcing a specific race.
+#[cfg(feature = "sharding")]
+pub fn set_sharding_announce_schedule(
+    schedule: Option<Vec<(kitsune2_api::AgentId, kitsune2_api::Timestamp)>>,
+) {
+    crate::sharding::announce_schedule_set(schedule);
+}

@@ -432,6 +432,11 @@ impl K2Sharding {
                     return;
                 }
             }
+            // Tests can dictate exactly when each agent may announce.
+            #[cfg(any(test, feature = "test-utils"))]
+            if !view_delay::announce_allowed(agent.agent(), now) {
+                return;
+            }
             self.announce_shrink(agent, ctl, lag, now).await;
         }
     }
@@ -984,7 +989,8 @@ mod stale_model;
 
 #[cfg(any(test, feature = "test-utils"))]
 pub(crate) mod view_delay {
-    //! Test-only artificial staleness.
+    //! Test-only artificial staleness, and a test-only announce
+    //! schedule for forcing a specific race.
     //!
     //! On the in-memory transport gossip is near instant, so every node
     //! acts on a fresh view and the stale-view shrink race cannot occur.
@@ -1005,6 +1011,35 @@ pub(crate) mod view_delay {
     /// this process. Zero turns it off.
     pub(crate) fn set(delay: Duration) {
         DELAY_MS.store(delay.as_millis() as u64, Ordering::Relaxed);
+    }
+
+    /// Announce schedule: when set, an agent may announce a shrink only
+    /// once, and not before its scheduled time; agents not listed never
+    /// announce. `None` restores normal behaviour.
+    static SCHEDULE: std::sync::Mutex<Option<HashMap<AgentId, Timestamp>>> =
+        std::sync::Mutex::new(None);
+
+    /// Set (or with `None`, clear) the announce schedule for every
+    /// sharding instance in this process.
+    pub(crate) fn set_schedule(schedule: Option<Vec<(AgentId, Timestamp)>>) {
+        *SCHEDULE.lock().expect("poisoned") =
+            schedule.map(|s| s.into_iter().collect());
+    }
+
+    /// Whether `agent` may announce now under the schedule; consumes its
+    /// slot when it may.
+    pub(crate) fn announce_allowed(agent: &AgentId, now: Timestamp) -> bool {
+        let mut lock = SCHEDULE.lock().expect("poisoned");
+        let Some(schedule) = lock.as_mut() else {
+            return true;
+        };
+        match schedule.get(agent) {
+            Some(at) if *at <= now => {
+                schedule.remove(agent);
+                true
+            }
+            _ => false,
+        }
     }
 
     type Snapshot = (

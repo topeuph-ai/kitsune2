@@ -62,7 +62,9 @@ pub use config::*;
 pub use controller::K2Sharding;
 
 #[cfg(any(test, feature = "test-utils"))]
-pub(crate) use controller::view_delay::set as view_delay_set;
+pub(crate) use controller::view_delay::{
+    set as view_delay_set, set_schedule as announce_schedule_set,
+};
 
 /// The module name for use when registering as a module handler.
 pub const SHARDING_MOD_NAME: &str = "k2sharding";
