@@ -23,7 +23,7 @@ cd kitsune2
 
 ## Run the tests
 
-All run on the in-memory transport on one machine. The first build takes a
+All run on one machine; all but `sharding_iroh` use the in-memory transport. The first build takes a
 few minutes.
 
 | command | what it checks | a pass means |
@@ -32,6 +32,7 @@ few minutes.
 | `cargo test -p kitsune2_gossip --features sharding --test sharding_cascade` | the staggered cascade, forced: four nodes, 2 s old views, descending-ID announcements (about 2 min) | **V3 loses every copy of a half** (the test expects that), V6 keeps one, and two controls behave as predicted |
 | `cargo test -p kitsune2_gossip --features sharding --test sharding_stale` | every node acting on 2 s old views (about 1.5 min) | V6 never takes any part of the DHT below target |
 | `cargo test -p kitsune2_gossip --features sharding --test sharding_race` | a simultaneous race with a thin margin (about 1 min) | V6's lowest racer waits, then leaves; nothing goes below target; nobody is left able to shrink |
+| `cargo test -p kitsune2_gossip --features sharding --test sharding_iroh` | the storm over the real iroh transport (QUIC, local relay), 8 nodes (about 1.5 min) | the network shards down, a quarter of it dies at once, and no part of the DHT is ever left with no holder |
 | `cargo test -p kitsune2_gossip --features sharding --test sharding_storm` | 8 nodes shard down, 3 are killed at once, the rest recover (about 20 s) | no part of the DHT is ever left with no holder, under V6 and V3 |
 
 Slower comparisons, which print CSV rather than assert, are marked
