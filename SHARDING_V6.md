@@ -33,6 +33,7 @@ few minutes.
 | `cargo test -p kitsune2_gossip --features sharding --test sharding_stale` | every node acting on 2 s old views (about 1.5 min) | V6 never takes any part of the DHT below target |
 | `cargo test -p kitsune2_gossip --features sharding --test sharding_race` | a simultaneous race with a thin margin (about 1 min) | V6's lowest racer waits, then leaves; nothing goes below target; nobody is left able to shrink |
 | `cargo test -p kitsune2_gossip --features sharding --test sharding_iroh` | the storm over the real iroh transport (QUIC, local relay), 8 nodes (about 1.5 min) | the network shards down, a quarter of it dies at once, and no part of the DHT is ever left with no holder |
+| `cargo test -p kitsune2_gossip --features sharding --test sharding_upgrade` | a real rollout: V6 nodes alongside nodes that never shrink (as nodes without dynamic sharding behave); six such nodes replaced by V6 nodes one at a time; V6 nodes with two different sets of timing settings (about 2.5 min) | no sector ever drops below target with no deaths, the fixed nodes never change, no V6 agent is left able to shrink, and the rollout never leaves part of the DHT with no holder and ends back at target |
 | `cargo test -p kitsune2_gossip --features sharding --test sharding_storm` | 8 nodes shard down, 3 are killed at once, the rest recover (about 20 s) | no part of the DHT is ever left with no holder, under V6 and V3 |
 
 Slower comparisons, which print CSV rather than assert, are marked

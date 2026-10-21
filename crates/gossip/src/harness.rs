@@ -447,6 +447,13 @@ impl K2GossipFunctionalTestFactory {
         self
     }
 
+    /// Change the sharding configuration for instances created from now
+    /// on, so one network can mix nodes with different settings.
+    #[cfg(feature = "sharding")]
+    pub fn set_sharding_config(&mut self, config: crate::K2ShardingConfig) {
+        self.sharding_config = Some(config);
+    }
+
     /// Create a new instance of the test harness.
     pub async fn new_instance(&self) -> K2GossipFunctionalTestHarness {
         #[derive(Debug)]
