@@ -385,7 +385,15 @@ pub struct K2GossipFunctionalTestFactory {
     /// The sharding configuration to use, if overriding the default.
     #[cfg(feature = "sharding")]
     sharding_config: Option<crate::K2ShardingConfig>,
+    /// A transport to use instead of the default in-memory one, and a hook
+    /// that applies its configuration once defaults are in place.
+    transport: Option<(kitsune2_api::DynTransportFactory, TransportConfigHook)>,
 }
+
+/// Applies transport-specific configuration to a builder (see
+/// [`K2GossipFunctionalTestFactory::with_transport`]).
+pub type TransportConfigHook =
+    Arc<dyn Fn(&kitsune2_api::Builder) + Send + Sync + 'static>;
 
 impl K2GossipFunctionalTestFactory {
     /// Create a new functional test factory.
@@ -412,7 +420,20 @@ impl K2GossipFunctionalTestFactory {
             },
             #[cfg(feature = "sharding")]
             sharding_config: None,
+            transport: None,
         }
+    }
+
+    /// Use the given transport (e.g. iroh) instead of the default in-memory
+    /// transport. `configure` runs after default configuration is set, so it
+    /// can override transport settings such as a relay URL.
+    pub fn with_transport(
+        mut self,
+        factory: kitsune2_api::DynTransportFactory,
+        configure: TransportConfigHook,
+    ) -> Self {
+        self.transport = Some((factory, configure));
+        self
     }
 
     /// Override the sharding configuration used by instances of this
@@ -435,6 +456,9 @@ impl K2GossipFunctionalTestFactory {
         let mut builder = default_test_builder();
         // Replace the core builder with a real gossip factory
         builder.gossip = K2GossipFactory::create();
+        if let Some((factory, _)) = &self.transport {
+            builder.transport = factory.clone();
+        }
 
         if !self.bootstrap {
             builder.bootstrap = Arc::new(NoopBootstrapFactory);
@@ -457,6 +481,10 @@ impl K2GossipFunctionalTestFactory {
                     k2_sharding: sharding_config.clone(),
                 })
                 .unwrap();
+        }
+
+        if let Some((_, configure)) = &self.transport {
+            configure(&builder);
         }
 
         let builder = Arc::new(builder);

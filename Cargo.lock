@@ -2435,6 +2435,7 @@ dependencies = [
  "kitsune2_dht",
  "kitsune2_gossip",
  "kitsune2_test_utils",
+ "kitsune2_transport_iroh",
  "prost",
  "rand 0.10.3",
  "schemars",

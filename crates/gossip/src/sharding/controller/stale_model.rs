@@ -430,3 +430,55 @@ fn v6_six_nodes_with_prompt_death() {
     );
     assert_eq!(0, bad);
 }
+
+/// How fast safety degrades when a death goes unnoticed: share of schedules
+/// in which a shrink takes the sector below R, for detection delays of 0..=6
+/// ticks (lag 2, wait 2, one death at any tick). Prints a table; asserts only
+/// that V6 is safe with prompt detection. Run with `--release --ignored
+/// --nocapture`.
+#[test]
+#[ignore = "slow sweep; run with --release --ignored --nocapture"]
+fn sweep_detection_delay() {
+    println!("detect | V6 failing / schedules | V3 failing / schedules");
+    for detect in 0..=6 {
+        let v6 = World::new(4, 2, 2, 2, Rule::Patient, detect).check(true);
+        let v3 = World::new(4, 2, 2, 2, Rule::TieBreak, detect).check(true);
+        println!(
+            "{detect} | {} / {} ({:.3}%) | {} / {} ({:.3}%)",
+            v6.1,
+            v6.0,
+            100.0 * v6.1 as f64 / v6.0 as f64,
+            v3.1,
+            v3.0,
+            100.0 * v3.1 as f64 / v3.0 as f64
+        );
+        if detect == 0 {
+            assert_eq!(0, v6.1);
+        }
+    }
+}
+
+/// How sharply safety breaks when the wait is shorter than the staleness:
+/// share of schedules violated for waits 1..=6 ticks against a maximum lag
+/// of 3, no deaths. Prints a table; asserts V6 is safe once wait >= lag.
+#[test]
+#[ignore = "slow sweep; run with --release --ignored --nocapture"]
+fn sweep_wait_against_lag() {
+    println!("wait/lag | V6 failing / schedules | V3 failing / schedules");
+    for d in 1..=6 {
+        let v6 = World::new(4, 2, 3, d, Rule::Patient, 0).check(false);
+        let v3 = World::new(4, 2, 3, d, Rule::TieBreak, 0).check(false);
+        println!(
+            "{d}/3 | {} / {} ({:.3}%) | {} / {} ({:.3}%)",
+            v6.1,
+            v6.0,
+            100.0 * v6.1 as f64 / v6.0 as f64,
+            v3.1,
+            v3.0,
+            100.0 * v3.1 as f64 / v3.0 as f64
+        );
+        if d >= 3 {
+            assert_eq!(0, v6.1, "V6 should be safe with wait >= lag");
+        }
+    }
+}
