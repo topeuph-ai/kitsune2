@@ -66,12 +66,14 @@ impl IntentTable {
         agent: AgentId,
         from: Option<Url>,
         expires_at: Timestamp,
-    ) {
+    ) -> bool {
         let mut lock = self.inner.lock().expect("poisoned");
         let key = (agent, from);
         if lock.get(&key).is_some_and(|i| i.expires_at == expires_at) {
             lock.remove(&key);
+            return true;
         }
+        false
     }
 
     /// Drop expired intents and return the live ones.
@@ -142,6 +144,22 @@ mod tests {
 
     fn agent(b: &'static [u8]) -> AgentId {
         AgentId::from(bytes::Bytes::from_static(b))
+    }
+
+    /// An intent is live strictly before its expiry, not at it.
+    #[test]
+    fn intent_is_gone_at_its_expiry_instant() {
+        let table = IntentTable::default();
+        let now = Timestamp::now();
+        table.insert(
+            agent(b"a"),
+            ShrinkIntent {
+                vacate: (0, 8),
+                expires_at: now,
+                from: None,
+            },
+        );
+        assert!(table.live(now).is_empty());
     }
 
     #[test]

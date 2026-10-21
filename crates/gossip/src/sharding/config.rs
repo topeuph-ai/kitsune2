@@ -191,3 +191,18 @@ pub struct K2ShardingModConfig {
     /// K2Sharding configuration.
     pub k2_sharding: K2ShardingConfig,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The shipped default is the recommended rule: patient lowest (V6)
+    /// with withdrawal, and the explicit intent channel it needs.
+    #[test]
+    fn default_is_patient_lowest_with_withdrawal() {
+        let c = K2ShardingConfig::default();
+        assert!(c.patient_lowest);
+        assert!(c.withdraw_on_stand_down);
+        assert!(!c.agentinfo_encoding);
+    }
+}

@@ -20,6 +20,8 @@ pub const STOOD_DOWN: &str = "sharding: shrink intent cancelled at re-check";
 pub const GREW: &str = "sharding: growing target arc";
 pub const GREW_SHORT: &str = "sharding: grow cause: sibling half short";
 pub const GREW_INTENTS: &str = "sharding: grow cause: announced vacates only";
+pub const WITHDRAWAL_APPLIED: &str =
+    "sharding: applied a withdrawal from its sender";
 pub const SENDER_MISMATCH: &str =
     "sharding: intents not from their agent's declared URL";
 

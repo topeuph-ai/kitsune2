@@ -66,6 +66,10 @@ struct Outcome {
     stood_down: usize,
     waited: usize,
     grew: usize,
+    /// Agent ids in schedule order.
+    order: Vec<String>,
+    /// This run's sharding events for these agents, in order.
+    log: Vec<(String, String)>,
 }
 
 async fn cascade_run(
@@ -73,6 +77,23 @@ async fn cascade_run(
     stale: bool,
     withdraw: bool,
     grow_persistence: f64,
+) -> Outcome {
+    cascade_run_ordered(
+        patient_lowest,
+        stale,
+        withdraw,
+        grow_persistence,
+        false,
+    )
+    .await
+}
+
+async fn cascade_run_ordered(
+    patient_lowest: bool,
+    stale: bool,
+    withdraw: bool,
+    grow_persistence: f64,
+    ascending: bool,
 ) -> Outcome {
     let events = events();
     events.lock().unwrap().clear();
@@ -166,7 +187,9 @@ async fn cascade_run(
     let mut ids: Vec<AgentId> =
         nodes.iter().map(|(_, i)| i.agent.clone()).collect();
     ids.sort();
-    ids.reverse();
+    if !ascending {
+        ids.reverse();
+    }
     let t0 = Timestamp::now() + Duration::from_millis(500);
     let schedule = ids
         .iter()
@@ -196,16 +219,24 @@ async fn cascade_run(
             .count()
     };
     let announced = count(ANNOUNCED);
-    assert_eq!(
-        NUM_NODES, announced,
-        "the schedule should make each agent announce exactly once"
-    );
+    if !ascending {
+        assert_eq!(
+            NUM_NODES, announced,
+            "the schedule should make each agent announce exactly once"
+        );
+    }
     Outcome {
         min_coverage,
         executed: count(EXECUTED),
         stood_down: count(STOOD_DOWN),
         waited: count(WAITED),
         grew: count(GREW),
+        order: ids.iter().map(|id| format!("{id:?}")).collect(),
+        log: log
+            .iter()
+            .filter(|(a, _)| ours.contains(a))
+            .cloned()
+            .collect(),
     }
 }
 
@@ -265,6 +296,30 @@ async fn forced_cascade_masked_by_fast_regrow() {
     assert!(
         o.min_coverage >= 1 && o.grew >= 1,
         "expected fast re-growth to mask the cascade: {o:?}"
+    );
+}
+
+/// The announce-time yield. Fresh views, V6, announcements scheduled in
+/// ASCENDING id order 1 s apart: once the lowest has announced, the others
+/// must not announce until its intent has resolved.
+#[tokio::test(flavor = "multi_thread")]
+async fn higher_ids_yield_while_a_lower_id_is_announcing() {
+    let _serial = SERIAL.lock().await;
+    let o = cascade_run_ordered(true, false, true, SLOW_REGROW, true).await;
+    let lowest = &o.order[0];
+    let mut open = false;
+    for (a, m) in &o.log {
+        if a == lowest && m == ANNOUNCED {
+            open = true;
+        } else if a == lowest && (m == EXECUTED || m == STOOD_DOWN) {
+            open = false;
+        } else if open && m == ANNOUNCED {
+            panic!("agent {a} announced while the lowest id was announcing");
+        }
+    }
+    assert!(
+        o.log.iter().any(|(a, m)| a == lowest && m == ANNOUNCED),
+        "the lowest id never announced: {o:?}"
     );
 }
 

@@ -235,6 +235,38 @@ async fn race_run(
         }
     }
     assert!(stats.executed >= 1, "no shrink executed");
+    // A waiting agent must go on to execute the same intent: its next
+    // announce / execute / stand-down event after a wait is the execute.
+    // (A wait that silently dropped the intent would show up here as a
+    // fresh announcement instead.)
+    for agent in waited_then.keys() {
+        let mut after_wait = false;
+        for (a, m) in &log {
+            if a != agent {
+                continue;
+            }
+            if m == WAITED {
+                after_wait = true;
+            } else if after_wait
+                && (m == ANNOUNCED || m == EXECUTED || m == STOOD_DOWN)
+            {
+                assert_eq!(
+                    EXECUTED, m,
+                    "agent {agent} waited, then did not execute that intent"
+                );
+                after_wait = false;
+            }
+        }
+    }
+    // With withdrawal on, a stand-down by an agent on one node must be
+    // applied by the other node.
+    if withdraw && stats.stood_down > 0 {
+        assert!(
+            log.iter()
+                .any(|(a, m)| ours.contains(a) && m == WITHDRAWAL_APPLIED),
+            "agents stood down but no node applied a withdrawal"
+        );
+    }
     // Remote intents must pass the sender check: if a peer's URL as seen
     // by the transport ever differed from its declared URL, every remote
     // intent would be silently dropped.

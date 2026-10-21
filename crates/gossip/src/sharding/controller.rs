@@ -942,11 +942,17 @@ impl TxModuleHandler for K2Sharding {
             Some(k2_sharding_message::Msg::ShrinkIntent(intent)) => {
                 let expires_at = Timestamp::from_micros(intent.expires_at_us);
                 if intent.withdrawn {
-                    self.intents.withdraw(
-                        AgentId::from(intent.agent_id),
+                    let agent = AgentId::from(intent.agent_id);
+                    if self.intents.withdraw(
+                        agent.clone(),
                         Some(peer),
                         expires_at,
-                    );
+                    ) {
+                        tracing::debug!(
+                            agent = ?agent,
+                            "sharding: applied a withdrawal from its sender"
+                        );
+                    }
                     return Ok(());
                 }
                 if expires_at <= Timestamp::now() {
@@ -1303,6 +1309,23 @@ mod tests {
 
     /// Disjoint intents, from either side of us in id order, neither
     /// count nor make us wait.
+    #[test]
+    fn adjacent_ranges_do_not_overlap() {
+        // Half-open ranges that only touch share no sector.
+        assert!(!overlaps((0, 8), (8, 16)));
+        assert!(!overlaps((8, 16), (0, 8)));
+        assert!(overlaps((0, 9), (8, 16)));
+        let r = 3;
+        let cov = vec![r; NUM_SECTORS as usize];
+        let me = agent(b"mmm");
+        let intents = vec![(agent(b"aaa"), intent((8, 16)))];
+        assert_eq!(
+            patient_recheck(&cov, &intents, &me, (0, 8), r),
+            Recheck::Proceed
+        );
+        assert!(!lower_racer(&intents, &me, (0, 8)));
+    }
+
     #[test]
     fn patient_ignores_disjoint_intents() {
         let r = 3;
