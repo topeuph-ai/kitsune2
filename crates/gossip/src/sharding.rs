@@ -63,7 +63,9 @@ pub use controller::K2Sharding;
 
 #[cfg(any(test, feature = "test-utils"))]
 pub(crate) use controller::view_delay::{
-    set as view_delay_set, set_schedule as announce_schedule_set,
+    set as view_delay_set,
+    set_ignore_unresponsive as view_delay_ignore_unresponsive,
+    set_schedule as announce_schedule_set,
 };
 
 /// The module name for use when registering as a module handler.

@@ -69,6 +69,7 @@ fn v6(target: u32) -> K2ShardingConfig {
         agentinfo_encoding: false,
         patient_lowest: true,
         withdraw_on_stand_down: true,
+        require_recent_contact: recent_contact(),
     }
 }
 

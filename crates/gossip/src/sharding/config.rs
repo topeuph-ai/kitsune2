@@ -155,6 +155,28 @@ pub struct K2ShardingConfig {
     /// Default: true
     #[cfg_attr(feature = "schema", schemars(default))]
     pub withdraw_on_stand_down: bool,
+
+    /// For shrink decisions, count a remote holder only if this node has
+    /// heard from it within the current wait.
+    ///
+    /// "Heard from" means a gossip message arrived from the peer (the
+    /// per-peer completed-rounds counter went up), in either direction.
+    /// kitsune2's last-gossip timestamp cannot be used for this: it is set
+    /// when a round is *attempted*, even if the peer never answers.
+    ///
+    /// This turns two of the rule's timing assumptions from trusted into
+    /// enforced, for holders: the information a shrink relies on about a
+    /// holder is never older than the wait, and a holder that has gone
+    /// silent (a death that has not been detected yet) stops counting
+    /// within one wait of its last message, however long the transport
+    /// takes to mark it unresponsive. When either assumption would be
+    /// violated the agent simply does not shrink: a cost in progress, not
+    /// in safety. Grow decisions are unaffected and still count every
+    /// holder not marked unresponsive.
+    ///
+    /// Default: true
+    #[cfg_attr(feature = "schema", schemars(default))]
+    pub require_recent_contact: bool,
 }
 
 impl Default for K2ShardingConfig {
@@ -172,6 +194,7 @@ impl Default for K2ShardingConfig {
             agentinfo_encoding: false,
             patient_lowest: true,
             withdraw_on_stand_down: true,
+            require_recent_contact: true,
         }
     }
 }
@@ -203,6 +226,7 @@ mod tests {
         let c = K2ShardingConfig::default();
         assert!(c.patient_lowest);
         assert!(c.withdraw_on_stand_down);
+        assert!(c.require_recent_contact);
         assert!(!c.agentinfo_encoding);
     }
 }

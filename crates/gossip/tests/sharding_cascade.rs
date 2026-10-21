@@ -130,6 +130,7 @@ async fn cascade_run_ordered(
         agentinfo_encoding: false,
         patient_lowest,
         withdraw_on_stand_down: withdraw,
+        require_recent_contact: recent_contact(),
     });
 
     // Keep creating single-agent nodes until four have their home sector

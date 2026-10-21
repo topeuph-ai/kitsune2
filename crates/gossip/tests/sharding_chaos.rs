@@ -27,6 +27,13 @@
 //! `CHAOS_WAIT_MS` overrides the wait. Set below the largest staleness it
 //! is a control: A1 no longer holds and the run is expected to fail.
 //!
+//! `CHAOS_UNDETECTED=1` makes every controller ignore unresponsive marks,
+//! as if no death were ever detected (assumption A3 broken for good).
+//! Without `require_recent_contact` (`SHARDING_RECENT_CONTACT=0`) a shrink
+//! can then count dead holders; with it, a silent holder stops counting
+//! within one wait. Nothing re-grows over an undetected death, so in this
+//! mode the end-of-run recovery is reported, not asserted.
+//!
 //! At the end the churn stops, staleness returns to zero, and every sector
 //! must get back to the target and stay there.
 //!
@@ -41,7 +48,7 @@ use common::*;
 use kitsune2_api::{AgentInfoSigned, DhtArc};
 use kitsune2_gossip::harness::{
     K2GossipFunctionalTestFactory, K2GossipFunctionalTestHarness,
-    set_sharding_view_delay,
+    set_sharding_ignore_unresponsive, set_sharding_view_delay,
 };
 use kitsune2_gossip::{K2GossipConfig, K2ShardingConfig};
 use kitsune2_test_utils::space::TEST_SPACE_ID;
@@ -99,6 +106,7 @@ fn config(wait_ms: u32) -> K2ShardingConfig {
         agentinfo_encoding: false,
         patient_lowest: true,
         withdraw_on_stand_down: true,
+        require_recent_contact: recent_contact(),
     }
 }
 
@@ -175,8 +183,13 @@ async fn chaos_soak_v6() {
     // A control: CHAOS_WAIT_MS below the largest staleness breaks A1, and
     // the run should then fail. If it never does, the checks have no teeth.
     let wait_ms = env("CHAOS_WAIT_MS", WAIT_MS as u64) as u32;
+    let undetected = env("CHAOS_UNDETECTED", 0) != 0;
+    set_sharding_ignore_unresponsive(undetected);
     let mut rng = Rng(seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1);
-    println!("chaos: {secs} s, seed {seed}, wait {wait_ms} ms");
+    println!(
+        "chaos: {secs} s, seed {seed}, wait {wait_ms} ms, recent contact          {}, undetected deaths {undetected}",
+        recent_contact()
+    );
 
     let factory = K2GossipFunctionalTestFactory::create(
         TEST_SPACE_ID,
@@ -301,6 +314,17 @@ async fn chaos_soak_v6() {
 
     // Calm: no more churn, fresh views. Every sector back at the target.
     set_sharding_view_delay(Duration::ZERO);
+    if undetected {
+        set_sharding_ignore_unresponsive(false);
+        drain_events(&mut t);
+        let cov = coverage(&view(&nodes).await);
+        println!(
+            "chaos done (undetected deaths), seed {seed}: {} nodes; min              coverage {}; {t:?}",
+            nodes.len(),
+            cov.iter().min().unwrap()
+        );
+        return;
+    }
     let deadline = tokio::time::Instant::now() + Duration::from_secs(180);
     let mut since: Option<tokio::time::Instant> = None;
     loop {

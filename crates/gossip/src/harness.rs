@@ -595,6 +595,14 @@ pub fn set_sharding_view_delay(delay: std::time::Duration) {
     crate::sharding::view_delay_set(delay);
 }
 
+/// Make every sharding controller in this process ignore unresponsive
+/// marks, as if no peer death were ever detected: to test what a shrink
+/// does when a holder has died silently.
+#[cfg(feature = "sharding")]
+pub fn set_sharding_ignore_unresponsive(on: bool) {
+    crate::sharding::view_delay_ignore_unresponsive(on);
+}
+
 /// Dictate when each agent may announce a shrink: once, not before its
 /// scheduled time; unlisted agents never announce. `None` restores normal
 /// behaviour. Process-wide, for forcing a specific race.

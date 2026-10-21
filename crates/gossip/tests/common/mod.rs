@@ -25,6 +25,13 @@ pub const WITHDRAWAL_APPLIED: &str =
 pub const SENDER_MISMATCH: &str =
     "sharding: intents not from their agent's declared URL";
 
+/// Whether the functional tests run with `require_recent_contact`: on
+/// unless `SHARDING_RECENT_CONTACT=0`, so the whole suite can be compared
+/// with and without it.
+pub fn recent_contact() -> bool {
+    std::env::var("SHARDING_RECENT_CONTACT").map_or(true, |v| v != "0")
+}
+
 /// Sharding-module log events, `(agent, message)`, in arrival order.
 pub type Events = Arc<Mutex<Vec<(String, String)>>>;
 

@@ -104,6 +104,9 @@ async fn storm(patient_lowest: bool) {
         patient_lowest,
         // The V3 arm keeps the original behaviour for comparison.
         withdraw_on_stand_down: patient_lowest,
+        // As `common::recent_contact` (this file does not use `common`).
+        require_recent_contact: std::env::var("SHARDING_RECENT_CONTACT")
+            .map_or(true, |v| v != "0"),
     });
 
     // Seed some data so gossip rounds have something to verify.

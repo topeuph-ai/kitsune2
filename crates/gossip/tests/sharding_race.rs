@@ -111,6 +111,7 @@ async fn race_run(
         agentinfo_encoding: false,
         patient_lowest,
         withdraw_on_stand_down: withdraw,
+        require_recent_contact: recent_contact(),
     });
 
     let a = factory.new_instance().await;

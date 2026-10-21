@@ -74,6 +74,10 @@ pub struct K2Sharding {
     /// Peers seen as gone (unresponsive or tombstoned) last tick, to
     /// detect fresh departures.
     last_gone: std::sync::Mutex<HashSet<AgentId>>,
+    /// Per peer URL: the completed-rounds count last seen, and when it
+    /// last went up (when this node last heard from the peer), if ever
+    /// observed. See `require_recent_contact`.
+    contact: std::sync::Mutex<HashMap<Url, (u32, Option<Timestamp>)>>,
     /// Test-only artificial staleness (see [`view_delay`]).
     #[cfg(any(test, feature = "test-utils"))]
     view_delay: view_delay::ViewDelay,
@@ -100,6 +104,7 @@ impl K2Sharding {
             intents: IntentTable::default(),
             states: Mutex::new(HashMap::new()),
             last_gone: std::sync::Mutex::new(HashSet::new()),
+            contact: std::sync::Mutex::new(HashMap::new()),
             #[cfg(any(test, feature = "test-utils"))]
             view_delay: Default::default(),
             _check_task: OnceLock::new(),
@@ -175,6 +180,11 @@ impl K2Sharding {
             let Some(url) = peer.url.clone() else {
                 continue;
             };
+            // Tests can simulate deaths that are never detected.
+            #[cfg(any(test, feature = "test-utils"))]
+            if view_delay::ignore_unresponsive() {
+                continue;
+            }
             if let Ok(Some(_)) =
                 self.peer_meta_store.get_unresponsive(url).await
             {
@@ -220,6 +230,17 @@ impl K2Sharding {
         }
         retain_declared(&mut live_intents, &declared_arcs, &own_ids);
         let lag = self.lag_estimate(&peers, &gone, now).await;
+
+        // Coverage for shrink decisions: with `require_recent_contact`,
+        // only holders heard from within the current wait count.
+        let shrink_base_cov = if self.config.require_recent_contact {
+            let silent = self.silent_peers(&peers, &gone, lag, now).await;
+            let mut skip = gone.clone();
+            skip.extend(silent);
+            others_coverage(&peers, &skip)
+        } else {
+            base_cov.clone()
+        };
 
         let mut states = self.states.lock().await;
 
@@ -275,9 +296,11 @@ impl K2Sharding {
             // The declared redundancy this agent sees around itself:
             // remote peers plus sibling local agents, excluding itself.
             let mut cov = base_cov.clone();
+            let mut shrink_cov = shrink_base_cov.clone();
             for other in &local_agents {
                 if other.agent() != agent.agent() {
                     add_cur_arc(&mut cov, &other.get_cur_storage_arc());
+                    add_cur_arc(&mut shrink_cov, &other.get_cur_storage_arc());
                 }
             }
 
@@ -300,6 +323,7 @@ impl K2Sharding {
                 agent,
                 ctl,
                 cov,
+                shrink_cov,
                 &live_intents,
                 visible_peers,
                 lag,
@@ -326,6 +350,7 @@ impl K2Sharding {
         agent: &DynLocalAgent,
         ctl: &mut AgentControl,
         cov: Vec<u32>,
+        shrink_cov: Vec<u32>,
         live_intents: &[(AgentId, ShrinkIntent)],
         visible_peers: usize,
         lag: Duration,
@@ -338,7 +363,7 @@ impl K2Sharding {
         // intent is pending.
         if let Some(pending) = &ctl.pending {
             if now >= pending.execute_at {
-                self.execute_intent(agent, ctl, &cov, live_intents, now)
+                self.execute_intent(agent, ctl, &shrink_cov, live_intents, now)
                     .await;
             }
             return;
@@ -391,7 +416,7 @@ impl K2Sharding {
         let mut shrink_cond = false;
         if ctl.declared_level > 0 {
             let (vs, ve) = vacate_half(ctl.home, ctl.declared_level);
-            shrink_cond = min_over(&cov, vs, ve) > cfg.target_redundancy;
+            shrink_cond = min_over(&shrink_cov, vs, ve) > cfg.target_redundancy;
         }
 
         // Hysteresis scaled to our own measured staleness.
@@ -466,10 +491,7 @@ impl K2Sharding {
         now: Timestamp,
     ) {
         let cfg = &self.config;
-        let wait = std::cmp::max(
-            lag.mul_f64(cfg.intent_wait),
-            Duration::from_millis(cfg.intent_min_wait_ms as u64),
-        );
+        let wait = self.wait_for(lag);
         let execute_at = now + wait;
         // Keep the intent visible for a grace period past execution so
         // growers stay conservative while the shrink propagates.
@@ -696,6 +718,68 @@ impl K2Sharding {
     /// last completed a gossip round with the peers we can see, clamped
     /// to the configured bounds. This is what the hysteresis and the
     /// intent wait scale from.
+    /// The wait between announcing and re-checking, for a given lag.
+    fn wait_for(&self, lag: Duration) -> Duration {
+        std::cmp::max(
+            lag.mul_f64(self.config.intent_wait),
+            Duration::from_millis(self.config.intent_min_wait_ms as u64),
+        )
+    }
+
+    /// Update the record of when each peer was last heard from, and
+    /// return the peers not heard from within the current wait (or never
+    /// observed to send anything). Peers already `gone` are skipped.
+    async fn silent_peers(
+        &self,
+        peers: &[Arc<AgentInfoSigned>],
+        gone: &HashSet<AgentId>,
+        lag: Duration,
+        now: Timestamp,
+    ) -> HashSet<AgentId> {
+        let lease = self.wait_for(lag);
+        // Tests that make the view a fixed time old make contact that old
+        // too: nothing in a view `d` old can be fresher than `d`.
+        #[cfg(any(test, feature = "test-utils"))]
+        let view_age = view_delay::current();
+        #[cfg(not(any(test, feature = "test-utils")))]
+        let view_age = Duration::ZERO;
+
+        let mut counts = Vec::new();
+        for peer in peers {
+            if peer.is_tombstone || gone.contains(&peer.agent) {
+                continue;
+            }
+            let Some(url) = peer.url.clone() else {
+                continue;
+            };
+            let n = self
+                .peer_meta_store
+                .completed_rounds(url.clone())
+                .await
+                .ok()
+                .flatten()
+                .unwrap_or(0);
+            counts.push((peer.agent.clone(), url, n));
+        }
+
+        let mut contact = self.contact.lock().expect("poisoned");
+        let mut silent = HashSet::new();
+        for (agent, url, n) in counts {
+            let entry = contact.entry(url).or_insert((n, None));
+            if n > entry.0 {
+                *entry = (n, Some(now));
+            }
+            let fresh = entry.1.is_some_and(|heard| {
+                let age = (now - heard).unwrap_or_default().max(view_age);
+                age < lease
+            });
+            if !fresh {
+                silent.insert(agent);
+            }
+        }
+        silent
+    }
+
     async fn lag_estimate(
         &self,
         peers: &[Arc<AgentInfoSigned>],
@@ -1017,6 +1101,25 @@ pub(crate) mod view_delay {
     /// this process. Zero turns it off.
     pub(crate) fn set(delay: Duration) {
         DELAY_MS.store(delay.as_millis() as u64, Ordering::Relaxed);
+    }
+
+    static IGNORE_UNRESPONSIVE: std::sync::atomic::AtomicBool =
+        std::sync::atomic::AtomicBool::new(false);
+
+    /// Make every sharding instance in this process ignore unresponsive
+    /// marks, as if no death were ever detected.
+    pub(crate) fn set_ignore_unresponsive(on: bool) {
+        IGNORE_UNRESPONSIVE.store(on, Ordering::Relaxed);
+    }
+
+    /// Whether unresponsive marks are being ignored.
+    pub(crate) fn ignore_unresponsive() -> bool {
+        IGNORE_UNRESPONSIVE.load(Ordering::Relaxed)
+    }
+
+    /// The current artificial view delay.
+    pub(crate) fn current() -> Duration {
+        Duration::from_millis(DELAY_MS.load(Ordering::Relaxed))
     }
 
     /// Announce schedule: when set, an agent may announce a shrink only

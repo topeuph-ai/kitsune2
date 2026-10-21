@@ -96,6 +96,7 @@ async fn stale_run(
         agentinfo_encoding: false,
         patient_lowest,
         withdraw_on_stand_down: withdraw,
+        require_recent_contact: recent_contact(),
     });
 
     let mut nodes = Vec::with_capacity(NUM_NODES);
