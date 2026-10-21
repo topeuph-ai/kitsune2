@@ -51,14 +51,21 @@ of them:
 - `withdraw_on_stand_down` (default `true`): a node that backs off withdraws
   its intent at once instead of letting it age out. Without it, V3 re-grows
   repeatedly.
+- `require_recent_contact` (default `true`): for shrink decisions, count a
+  holder only if this node has heard from it (a gossip message arrived)
+  within the current wait. A holder that has gone silent, including one
+  that died without being detected, stops counting within one wait. Set
+  `SHARDING_RECENT_CONTACT=0` to run the tests without it.
 - `agentinfo_encoding` (default `false`): an older experiment that carries the
   intent on the AgentInfo arc claim. V6 needs the explicit intent channel, so
   it is ignored when this is set.
 
-Two test-only hooks, compiled only with `cfg(test)` or the `test-utils`
+Three test-only hooks, compiled only with `cfg(test)` or the `test-utils`
 feature, are in `crates/gossip/src/harness.rs`:
-`set_sharding_view_delay` (make nodes act on old views) and
-`set_sharding_announce_schedule` (dictate who announces when).
+`set_sharding_view_delay` (make nodes act on old views),
+`set_sharding_announce_schedule` (dictate who announces when) and
+`set_sharding_ignore_unresponsive` (simulate deaths that are never detected;
+`CHAOS_UNDETECTED=1` in the chaos soak).
 
 ## Results and limits
 
