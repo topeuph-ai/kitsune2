@@ -5,6 +5,8 @@ on:
   push:
     branches:
       - main
+      - feat/sharding-v6
+  workflow_dispatch: {}
 
 concurrency:
   group: test-${{ github.ref }}
@@ -119,6 +121,33 @@ jobs:
 
       - name: Examples
         run: cargo run --example schema --features schema
+
+  # feat/sharding-v6 only: the sharding module is behind a feature flag that
+  # the default test run leaves off, so run its tests explicitly.
+  test-sharding:
+    needs: fmt
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: false
+
+      # we cannot use cmake 4 until openssl-src is updated
+      - name: cmake
+        uses: jwlawson/actions-setup-cmake@v2
+        with:
+          cmake-version: '3.31.x'
+
+      - name: Sharding clippy
+        run: cargo clippy -p kitsune2_gossip --features sharding --all-targets -- --deny=warnings
+
+      - name: Sharding tests
+        env:
+          RUST_LOG: info
+        run: cargo test -p kitsune2_gossip --features sharding
 
   test-windows:
     needs: fmt
