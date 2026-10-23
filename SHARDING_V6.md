@@ -11,6 +11,19 @@ storage arc without leaving any part of the DHT below the redundancy target.
 The recommended rule is **V6, "patient lowest"**, and it is the default here.
 The original rule, V3 (lowest-ID tie-break), is kept for comparison.
 
+**What V6 changes.** When several nodes want to drop the same part of the
+DHT at once, V3 lets the lowest-ID one go ahead on the assumption that the
+others stay. V6 counts every node that has announced an intent to shrink as
+already gone. If that leaves too few holders only because of higher-ID
+announcers, the lowest one keeps its intent and waits instead of giving up.
+
+**What the tests check.** Three properties, named separately below:
+
+- *at target*: every sector keeps at least the redundancy target of holders.
+- *never orphaned*: every sector keeps at least one holder. This is weaker. It
+  is used where a test deliberately kills nodes to push sectors below target.
+- *settled*: no live V6 node is left holding a shrink it could still make.
+
 ## Setup
 
 You need git and [rustup](https://rustup.rs). The pinned toolchain (Rust
@@ -28,13 +41,13 @@ few minutes.
 
 | command | what it checks | a pass means |
 |---|---|---|
-| `cargo test -p kitsune2_gossip --features sharding --lib sharding` | unit tests, plus an exhaustive model check that drives the real re-check code through every announce timing, view lag and death (about 3 s) | V6 is safe in every schedule; V3 fails the schedules the Python checker says it fails, with matching counts |
+| `cargo test -p kitsune2_gossip --features sharding --lib sharding` | unit tests, plus an exhaustive model check that drives the real re-check code through every announce timing, view lag and death (about 3 s) | V6 stays at target in every schedule within the check's bounds (small networks; see results §1, and the large run below: 4 nodes, 2 copies, wait 2.5× the view lag), assuming deaths are noticed within the wait; V3 fails the schedules the Python checker says it fails, with matching counts |
 | `cargo test -p kitsune2_gossip --features sharding --test sharding_cascade` | the staggered cascade, forced: four nodes, 2 s old views, descending-ID announcements (about 2 min) | **V3 loses every copy of a half** (the test expects that), V6 keeps one, and two controls behave as predicted |
 | `cargo test -p kitsune2_gossip --features sharding --test sharding_stale` | every node acting on 2 s old views (about 1.5 min) | V6 never takes any part of the DHT below target |
 | `cargo test -p kitsune2_gossip --features sharding --test sharding_race` | a simultaneous race with a thin margin (about 1 min) | V6's lowest racer waits, then leaves; nothing goes below target; nobody is left able to shrink |
 | `cargo test -p kitsune2_gossip --features sharding --test sharding_iroh` | the storm over the real iroh transport (QUIC, local relay), 8 nodes (about 1.5 min) | the network shards down, a quarter of it dies at once, and no part of the DHT is ever left with no holder |
 | `cargo test -p kitsune2_gossip --features sharding --test sharding_upgrade` | a real rollout: V6 nodes alongside nodes that never shrink (as nodes without dynamic sharding behave); six such nodes replaced by V6 nodes one at a time; V6 nodes with two different sets of timing settings (about 2.5 min) | no sector ever drops below target with no deaths, the fixed nodes never change, no V6 agent is left able to shrink, and the rollout never leaves part of the DHT with no holder and ends back at target |
-| `CHAOS_SECS=3600 cargo test -p kitsune2_gossip --features sharding --test sharding_chaos -- --ignored --nocapture` | an hour of random kills, joins and staleness changes (0–1.5 s, wait 2 s), 7–14 nodes; `CHAOS_SEED` picks the sequence, `CHAOS_WAIT_MS=300` is the control | no shrink ever takes a sector below target and no sector is left without a holder (outside 5 s after a kill), and at the end everything returns to target. The control is expected to **fail** |
+| `CHAOS_SECS=3600 cargo test -p kitsune2_gossip --features sharding --test sharding_chaos -- --ignored --nocapture` | an hour of random kills, joins and staleness changes (0–1.5 s, wait 2 s), 7–14 nodes; `CHAOS_SEED` picks the sequence, `CHAOS_WAIT_MS=300` is the control | no shrink ever takes a sector below target and no sector is left without a holder (outside 5 s after a kill, which is the window before a death can be noticed), and at the end everything returns to target. The control is expected to **fail** |
 | `cargo test -p kitsune2_gossip --features sharding --test sharding_storm` | 8 nodes shard down, 3 are killed at once, the rest recover (about 20 s) | no part of the DHT is ever left with no holder, under V6 and V3 |
 
 Slower comparisons, which print CSV rather than assert, are marked
@@ -57,8 +70,10 @@ of them:
   that died without being detected, stops counting within one wait. Set
   `SHARDING_RECENT_CONTACT=0` to run the tests without it.
 - `agentinfo_encoding` (default `false`): an older experiment that carries the
-  intent on the AgentInfo arc claim. V6 needs the explicit intent channel, so
-  it is ignored when this is set.
+  intent on the AgentInfo arc claim. ⚠️ **Setting this turns V6 off**:
+  `patient_lowest` is ignored and the node falls back to V3, because a
+  narrowed arc claim cannot tell an intender from a peer that has already
+  left. Leave it `false` to test V6.
 
 Three test-only hooks, compiled only with `cfg(test)` or the `test-utils`
 feature, are in `crates/gossip/src/harness.rs`:
@@ -76,3 +91,12 @@ One machine, the in-memory transport, a handful of nodes. No Holochain
 conductor, no wide-area network. Real-transport (iroh) measurements of the
 older V3 code are in polite-shrink's `wind_tunnel/`. They have not been
 repeated for V6.
+
+Covered in the results file but not in this test suite:
+
+- V6 over iroh at 8, 16, 24 and 32 nodes (§8.4).
+- Nodes that lie about what they store (§8.3, in the Python simulation).
+- Waits shorter than the real staleness (§8.2).
+
+**Not tested anywhere yet:** a network partition, where two isolated groups
+each judge it safe to shrink.
