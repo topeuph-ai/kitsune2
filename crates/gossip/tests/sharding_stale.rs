@@ -101,6 +101,8 @@ async fn stale_run(
         coordinated_growth: coordinated_growth(),
         critical_repair: true,
         pinned: false,
+        probe_sibling_holders: true,
+        probe_interval_ms: 1_000,
     });
 
     let mut nodes = Vec::with_capacity(NUM_NODES);

@@ -53,4 +53,18 @@ mod tests {
 
         assert_eq!(msg, decoded);
     }
+
+    #[test]
+    fn probe_round_trip() {
+        let msg = K2ShardingMessage {
+            msg: Some(k2_sharding_message::Msg::Probe(
+                K2ShardingProbeMessage {},
+            )),
+        };
+        let decoded = deserialize_sharding_message(serialize_sharding_message(
+            msg.clone(),
+        ))
+        .unwrap();
+        assert_eq!(msg, decoded);
+    }
 }

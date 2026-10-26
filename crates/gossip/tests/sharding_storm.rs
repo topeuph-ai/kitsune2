@@ -112,6 +112,8 @@ async fn storm(patient_lowest: bool) {
             .is_ok_and(|v| v == "1"),
         critical_repair: true,
         pinned: false,
+        probe_sibling_holders: true,
+        probe_interval_ms: 1_000,
     });
 
     // Seed some data so gossip rounds have something to verify.

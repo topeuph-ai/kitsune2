@@ -6,7 +6,7 @@
 /// touching the gossip message enum.
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct K2ShardingMessage {
-    #[prost(oneof = "k2_sharding_message::Msg", tags = "1")]
+    #[prost(oneof = "k2_sharding_message::Msg", tags = "1, 2")]
     pub msg: ::core::option::Option<k2_sharding_message::Msg>,
 }
 /// Nested message and enum types in `K2ShardingMessage`.
@@ -16,6 +16,9 @@ pub mod k2_sharding_message {
         /// An announcement of intent to shrink a storage arc.
         #[prost(message, tag = "1")]
         ShrinkIntent(super::K2ShardingShrinkIntentMessage),
+        /// A liveness probe; see K2ShardingProbeMessage.
+        #[prost(message, tag = "2")]
+        Probe(super::K2ShardingProbeMessage),
     }
 }
 /// Announces that the sending agent intends to shrink its storage arc,
@@ -56,3 +59,11 @@ pub struct K2ShardingShrinkIntentMessage {
     #[prost(bool, tag = "6")]
     pub grow: bool,
 }
+/// A liveness probe, with no content. An agent sends it to the holders of
+/// the half it would grow into: gossip runs only between agents whose arcs
+/// overlap, so without it a holder of that half could die unnoticed, and
+/// the gap it left stay hidden until its agent info expired. A failed send
+/// marks the holder unresponsive, as for any other send. Receivers ignore
+/// it; ones that do not know it decode an empty message and ignore that.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct K2ShardingProbeMessage {}

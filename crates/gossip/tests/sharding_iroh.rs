@@ -81,6 +81,8 @@ async fn storm_over_iroh(num_nodes: usize) -> StormStats {
         coordinated_growth: coordinated_growth(),
         critical_repair: true,
         pinned: false,
+        probe_sibling_holders: true,
+        probe_interval_ms: 1_000,
     })
     .with_transport(
         IrohTransportFactory::create(),

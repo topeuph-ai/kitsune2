@@ -8,7 +8,7 @@ use super::intents::{
     IntentTable, ShrinkIntent, retain_declared, retain_growers,
 };
 use super::protocol::{
-    K2ShardingMessage, K2ShardingShrinkIntentMessage,
+    K2ShardingMessage, K2ShardingProbeMessage, K2ShardingShrinkIntentMessage,
     deserialize_sharding_message, k2_sharding_message,
     serialize_sharding_message,
 };
@@ -85,6 +85,8 @@ pub struct K2Sharding {
     /// last went up (when this node last heard from the peer), if ever
     /// observed. See `require_recent_contact`.
     contact: std::sync::Mutex<HashMap<Url, (u32, Option<Timestamp>)>>,
+    /// When each peer was last probed (see `probe_sibling_holders`).
+    last_probe: std::sync::Mutex<HashMap<Url, Timestamp>>,
     /// Test-only artificial staleness (see [`view_delay`]).
     #[cfg(any(test, feature = "test-utils"))]
     view_delay: view_delay::ViewDelay,
@@ -113,6 +115,7 @@ impl K2Sharding {
             states: Mutex::new(HashMap::new()),
             last_gone: std::sync::Mutex::new(HashSet::new()),
             contact: std::sync::Mutex::new(HashMap::new()),
+            last_probe: std::sync::Mutex::new(HashMap::new()),
             #[cfg(any(test, feature = "test-utils"))]
             view_delay: Default::default(),
             _check_task: OnceLock::new(),
@@ -257,7 +260,19 @@ impl K2Sharding {
         // in rotation, so healthy peers routinely go unheard for a while.
         // And deaths are marked quickly: on the in-memory transport, all
         // killed peers within 12 s, most within 2 s; see sharding_detect.)
-        let grow_base_cov = base_cov.clone();
+        // Backstop for a death no probe has caught: a holder whose agent
+        // info is older than half its validity has stopped re-signing it
+        // (agents re-sign well inside that), so it is presumed dead.
+        let grow_base_cov = {
+            let mut skip = gone.clone();
+            skip.extend(
+                peers
+                    .iter()
+                    .filter(|p| stale_info(p, now))
+                    .map(|p| p.agent.clone()),
+            );
+            others_coverage(&peers, &skip)
+        };
 
         let mut states = self.states.lock().await;
 
@@ -354,6 +369,16 @@ impl K2Sharding {
 
         // Forget agents that have left the space.
         states.retain(|id, _| own_ids.contains(id));
+
+        if self.config.probe_sibling_holders {
+            let halves: Vec<(u32, u32)> = states
+                .values()
+                .filter(|ctl| ctl.declared_level < MAX_LEVEL)
+                .map(|ctl| sibling_half(ctl.home, ctl.declared_level))
+                .collect();
+            drop(states);
+            self.probe_holders(&peers, &gone, &halves, now).await;
+        }
 
         Ok(())
     }
@@ -987,6 +1012,87 @@ impl K2Sharding {
         staleness[idx].clamp(floor, ceiling)
     }
 
+    /// Probe the peers holding any sector of `halves`, each at most once
+    /// per `probe_interval_ms`. A failed send marks the peer unresponsive.
+    async fn probe_holders(
+        &self,
+        peers: &[Arc<AgentInfoSigned>],
+        gone: &HashSet<AgentId>,
+        halves: &[(u32, u32)],
+        now: Timestamp,
+    ) {
+        if halves.is_empty() {
+            return;
+        }
+        let Some(transport) = self.transport.upgrade() else {
+            return;
+        };
+        let interval =
+            Duration::from_millis(self.config.probe_interval_ms as u64);
+        let mut due = Vec::new();
+        {
+            let mut last = self.last_probe.lock().expect("poisoned");
+            for peer in peers {
+                if peer.is_tombstone || gone.contains(&peer.agent) {
+                    continue;
+                }
+                let Some(url) = peer.url.clone() else {
+                    continue;
+                };
+                let holds = halves.iter().any(|&(s, e)| {
+                    (s..e).any(|sector| {
+                        let lo = sector * SECTOR_SIZE;
+                        peer.storage_arc.contains(lo)
+                            && peer.storage_arc.contains(lo + (SECTOR_SIZE - 1))
+                    })
+                });
+                if !holds {
+                    continue;
+                }
+                let fresh = last
+                    .get(&url)
+                    .is_some_and(|t| (now - *t).unwrap_or_default() < interval);
+                if fresh {
+                    continue;
+                }
+                last.insert(url.clone(), now);
+                due.push(url);
+            }
+        }
+        if due.is_empty() {
+            return;
+        }
+        let msg = serialize_sharding_message(K2ShardingMessage {
+            msg: Some(k2_sharding_message::Msg::Probe(
+                K2ShardingProbeMessage {},
+            )),
+        });
+        let space_id = self.space_id.clone();
+        // Fire-and-forget, as for broadcasts: a send to a dead peer can
+        // block for the transport's connect timeout.
+        tokio::task::spawn(async move {
+            let sends = due.into_iter().map(|url| {
+                let transport = transport.clone();
+                let space_id = space_id.clone();
+                let msg = msg.clone();
+                async move {
+                    if let Err(e) = transport
+                        .send_module(
+                            url.clone(),
+                            space_id,
+                            SHARDING_MOD_NAME.to_string(),
+                            msg,
+                        )
+                        .await
+                    {
+                        tracing::debug!(?e, %url, "sharding: probe failed");
+                    }
+                }
+            });
+            futures::future::join_all(sends).await;
+        });
+    }
+
     /// Send a sharding message to every reachable peer.
     ///
     /// Full fan-out is deliberate for now: shrink intents are rare, tiny,
@@ -1126,6 +1232,23 @@ fn lower_racer(
     live_intents
         .iter()
         .any(|(id, i)| id < own_id && overlaps(i.vacate, vacate))
+}
+
+/// Has this agent info gone stale? Agents re-sign their info well inside
+/// its validity (every minute, for five minutes, by default), so one
+/// older than half its validity belongs to an agent that has stopped.
+fn stale_info(info: &AgentInfoSigned, now: Timestamp) -> bool {
+    stale_by(info.created_at, info.expires_at, now)
+}
+
+fn stale_by(
+    created_at: Timestamp,
+    expires_at: Timestamp,
+    now: Timestamp,
+) -> bool {
+    let valid = (expires_at - created_at).unwrap_or_default();
+    let age = (now - created_at).unwrap_or_default();
+    age > valid / 2
 }
 
 /// The coverage a grower judges a range by: what it sees, with every
@@ -1290,7 +1413,7 @@ impl TxModuleHandler for K2Sharding {
                     },
                 );
             }
-            None => (),
+            Some(k2_sharding_message::Msg::Probe(_)) | None => (),
         }
         Ok(())
     }
@@ -1660,6 +1783,21 @@ mod tests {
         // With exactly the target besides us, no lower racer fits.
         let thin = vec![r; NUM_SECTORS as usize];
         assert!(!room_alongside(&thin, &one, &me, (0, 8), r));
+    }
+
+    /// Agent infos last five minutes and are re-signed every minute: a
+    /// fresh or recently re-signed one is live, one not re-signed for over
+    /// half its validity is stale.
+    #[test]
+    fn agent_info_goes_stale_after_half_its_validity() {
+        let created = Timestamp::now();
+        let expires = created + Duration::from_secs(300);
+        let at = |s| created + Duration::from_secs(s);
+        assert!(!stale_by(created, expires, at(0)));
+        assert!(!stale_by(created, expires, at(60)));
+        assert!(!stale_by(created, expires, at(150)));
+        assert!(stale_by(created, expires, at(151)));
+        assert!(stale_by(created, expires, at(400)));
     }
 
     /// Ranges that only touch neither overlap nor block a re-check.

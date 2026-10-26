@@ -225,6 +225,28 @@ pub struct K2ShardingConfig {
     /// Default: false
     #[cfg_attr(feature = "schema", schemars(default))]
     pub pinned: bool,
+
+    /// Probe the holders of the half each agent would grow into, at most
+    /// once per `probe_interval_ms` each.
+    ///
+    /// Gossip runs only between agents whose arcs overlap, and a peer is
+    /// marked unresponsive only when a send to it fails. Once a network has
+    /// sharded, an agent never contacts the holders of the half it would
+    /// grow into, so their deaths went unnoticed and the gaps they left
+    /// stayed hidden until their agent info expired (5 minutes by
+    /// default). A probe is an empty message; when it fails, the holder is
+    /// marked unresponsive and the gap shows.
+    ///
+    /// Default: true
+    #[cfg_attr(feature = "schema", schemars(default))]
+    pub probe_sibling_holders: bool,
+
+    /// The least time between two probes of the same peer, in
+    /// milliseconds.
+    ///
+    /// Default: 10,000 (10s)
+    #[cfg_attr(feature = "schema", schemars(default))]
+    pub probe_interval_ms: u32,
 }
 
 impl Default for K2ShardingConfig {
@@ -247,6 +269,8 @@ impl Default for K2ShardingConfig {
             coordinated_growth: false,
             critical_repair: true,
             pinned: false,
+            probe_sibling_holders: true,
+            probe_interval_ms: 10_000,
         }
     }
 }
@@ -283,6 +307,7 @@ mod tests {
         assert!(!c.coordinated_growth);
         assert!(c.critical_repair);
         assert!(!c.pinned);
+        assert!(c.probe_sibling_holders);
         assert!(!c.agentinfo_encoding);
     }
 }
