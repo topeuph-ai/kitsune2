@@ -7,8 +7,11 @@
 //!   sector grows; with `coordinated_growth`, agents announce the range,
 //!   wait, and grow only if it is still short counting lower-id announced
 //!   growers. Asserted both ways: no sector is left without a holder after
-//!   the death-detection window, and every sector gets back to the target.
-//!   With coordination, fewer agents grow to repair the same deaths.
+//!   the death-detection window, and every short sector that some agent
+//!   could grow into is repaired within 60 s. (Full recovery to the target is
+//!   not asserted: growth is sibling-half-local, so a thin sector with no
+//!   neighbour to grow into stays thin; the clamp, or the simulator's
+//!   expanding-ring repair, is the designed path for that.)
 //! - **Pinned.** Eight nodes, one pinned: it keeps the full arc throughout
 //!   while the others shard down; once every sector reaches the target none
 //!   drops below it, and no unpinned agent is left able to shrink.
@@ -130,12 +133,20 @@ async fn settle(nodes: &[Node], target: u32, what: &str) -> Vec<AgentView> {
 #[derive(Debug)]
 #[allow(dead_code)] // read through Debug, in the printout
 struct Herd {
+    /// "grow cause" decisions logged (the grow condition met).
+    grow_causes: usize,
     grows_after_kill: usize,
     grow_announced: usize,
+    grow_executed: usize,
     grow_stood_down: usize,
     critical: usize,
     holes_in_grace: usize,
-    secs_to_target: f64,
+    /// Fewest copies of any sector, 60 s after the kill.
+    min_end: u32,
+    /// Sectors still below the target then.
+    short_end: usize,
+    /// ... of which some agent's sibling half contains them.
+    short_reachable: usize,
 }
 
 async fn herd(coordinated: bool) -> Herd {
@@ -180,10 +191,11 @@ async fn herd(coordinated: bool) -> Herd {
         drop(nodes.remove(*i));
     }
 
-    // Recovery: no hole after the grace window; back to the target.
+    // Watch for 60 s: no hole after the grace window.
     let mut holes_in_grace = 0;
-    let deadline = killed_at + Duration::from_secs(240);
-    let secs_to_target = loop {
+    let mut min_end = 0;
+    let watch_until = killed_at + Duration::from_secs(60);
+    while tokio::time::Instant::now() < watch_until {
         let cov = coverage(&view(&nodes).await);
         let holes = cov.iter().filter(|&&c| c == 0).count();
         if killed_at.elapsed() < GRACE {
@@ -194,41 +206,76 @@ async fn herd(coordinated: bool) -> Herd {
                 "a sector has no holder after the grace window"
             );
         }
-        if *cov.iter().min().unwrap() >= TARGET {
-            break killed_at.elapsed().as_secs_f64();
-        }
-        assert!(tokio::time::Instant::now() < deadline, "never recovered");
+        min_end = *cov.iter().min().unwrap();
         tokio::time::sleep(Duration::from_millis(50)).await;
-    };
-    // Let any announced grows resolve before counting.
-    settle(&nodes, TARGET, "recover").await;
+    }
+    // Let grows announced near the end resolve before counting (a re-check
+    // comes one wait, at most 2.5 x the 2 s lag ceiling, after announcing).
+    tokio::time::sleep(Duration::from_secs(12)).await;
+    let end_view = view(&nodes).await;
+    let end_cov = coverage(&end_view);
+    let short_end = end_cov.iter().filter(|&&c| c < TARGET).count();
+    // How many short sectors lie in some agent's sibling half, the only
+    // place an agent can grow into? The rest no local grow can reach.
+    let reachable = (0..NUM_SECTORS)
+        .filter(|&x| end_cov[x as usize] < TARGET)
+        .filter(|&x| {
+            end_view.iter().any(|(_, _, r)| {
+                let Some((s, e)) = *r else { return false };
+                let len = e - s;
+                if len >= NUM_SECTORS {
+                    return false;
+                }
+                let parent = (s / (2 * len)) * (2 * len);
+                let (ps, pe) = (parent, parent + 2 * len);
+                ps <= x && x < pe && !(s <= x && x < e)
+            })
+        })
+        .count();
     let log = events.lock().unwrap();
     let after = &log[mark..];
     let count = |what: &str| after.iter().filter(|(_, m)| m == what).count();
     Herd {
+        grow_causes: count(GREW_SHORT) + count(GREW_INTENTS),
         grows_after_kill: count(GREW),
         grow_announced: count(GROW_ANNOUNCED),
+        grow_executed: count(GROW_EXECUTED),
         grow_stood_down: count(GROW_STOOD_DOWN),
         critical: count(CRITICAL_REPAIR),
         holes_in_grace,
-        secs_to_target,
+        min_end,
+        short_end,
+        short_reachable: reachable,
     }
 }
 
+/// Asserted for both settings: no hole after the grace window (inside
+/// `herd`), and every short sector some agent could grow into has been
+/// repaired within 60 s. With coordination, every announced grow is
+/// resolved (grown or stood down). How many agents grow is printed but not
+/// compared: each run draws new random agent ids, so the two runs face
+/// different networks; the like-for-like comparison is the simulator's
+/// (polite-shrink `reports/REPORT_v7.md`).
 #[tokio::test(flavor = "multi_thread")]
-async fn coordinated_growth_repairs_deaths_with_fewer_growers() {
+async fn growth_repairs_deaths_with_and_without_coordination() {
     let _serial = SERIAL.lock().await;
-    let off = herd(false).await;
-    println!("coordinated growth off: {off:?}");
-    let on = herd(true).await;
-    println!("coordinated growth on:  {on:?}");
-    assert!(on.grow_announced > 0, "coordinated growth never announced");
-    assert!(
-        on.grows_after_kill <= off.grows_after_kill,
-        "coordination should not add growers: on {} vs off {}",
-        on.grows_after_kill,
-        off.grows_after_kill
-    );
+    for coordinated in [false, true] {
+        let h = herd(coordinated).await;
+        println!("coordinated growth {coordinated}: {h:?}");
+        assert_eq!(
+            0, h.short_reachable,
+            "short sectors that an agent could grow into were not repaired              (coordinated {coordinated}): {h:?}"
+        );
+        if coordinated {
+            assert_eq!(
+                h.grow_announced,
+                h.grow_executed + h.grow_stood_down,
+                "an announced grow was neither executed nor stood down: {h:?}"
+            );
+        } else {
+            assert_eq!(0, h.grow_announced, "V6 announced a grow: {h:?}");
+        }
+    }
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -247,14 +294,13 @@ async fn pinned_node_keeps_everything_while_others_shard() {
     let settled = loop {
         let now = view(&nodes).await;
         if let Some((_, _, range)) = now.iter().find(|(a, ..)| *a == pinned_id)
+            && armed
         {
-            if armed {
-                assert_eq!(
-                    Some((0, NUM_SECTORS)),
-                    *range,
-                    "the pinned agent shrank"
-                );
-            }
+            assert_eq!(
+                Some((0, NUM_SECTORS)),
+                *range,
+                "the pinned agent shrank"
+            );
         }
         let cov = coverage(&now);
         let min = *cov.iter().min().unwrap();

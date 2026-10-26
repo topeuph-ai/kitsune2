@@ -371,6 +371,16 @@ impl K2Sharding {
         elapsed: Duration,
     ) {
         let cfg = &self.config;
+        // Growth protects the floor, so it reads silence the same cautious
+        // way shrinking does: with require_recent_contact, a holder not
+        // heard from within the wait does not count. Otherwise a holder
+        // that died silently would hide the gap it left until the
+        // transport marks it unresponsive.
+        let grow_cov = if cfg.require_recent_contact {
+            shrink_cov.clone()
+        } else {
+            cov.clone()
+        };
 
         // Phase two of an announced shrink; no other decisions while an
         // intent is pending.
@@ -383,8 +393,14 @@ impl K2Sharding {
         }
         if let Some(pending) = &ctl.pending_grow {
             if now >= pending.execute_at {
-                self.execute_grow(agent, ctl, &cov, live_intents, live_grows)
-                    .await;
+                self.execute_grow(
+                    agent,
+                    ctl,
+                    &grow_cov,
+                    live_intents,
+                    live_grows,
+                )
+                .await;
             }
             return;
         }
@@ -423,7 +439,7 @@ impl K2Sharding {
         // grow decision in the logs.
         let mut grow_short_without_intents = false;
         if ctl.declared_level < MAX_LEVEL {
-            let mut eff = cov.clone();
+            let mut eff = grow_cov.clone();
             for (id, intent) in live_intents {
                 if id != agent.agent() {
                     subtract_sectors(
@@ -436,7 +452,7 @@ impl K2Sharding {
             let (ws, we) = sibling_half(ctl.home, ctl.declared_level);
             grow_cond = min_over(&eff, ws, we) < cfg.target_redundancy;
             grow_short_without_intents =
-                min_over(&cov, ws, we) < cfg.target_redundancy;
+                min_over(&grow_cov, ws, we) < cfg.target_redundancy;
         }
 
         // Shrink check: does the half we would drop stay strictly above
@@ -474,7 +490,8 @@ impl K2Sharding {
                     "sharding: grow cause: announced vacates only"
                 );
             }
-            self.grow(agent, ctl, &cov, live_intents, lag, now).await;
+            self.grow(agent, ctl, &grow_cov, live_intents, lag, now)
+                .await;
         } else if shrink_cond && ctl.shrink_acc >= shrink_need {
             // Patient lowest: hold off while a lower id is racing us for
             // the same sectors. The accumulator is kept, so we announce
