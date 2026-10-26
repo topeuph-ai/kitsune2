@@ -132,6 +132,9 @@ async fn cascade_run_ordered(
         withdraw_on_stand_down: withdraw,
         require_recent_contact: recent_contact(),
         announce_alongside: true,
+        coordinated_growth: coordinated_growth(),
+        critical_repair: true,
+        pinned: false,
     });
 
     // Keep creating single-agent nodes until four have their home sector

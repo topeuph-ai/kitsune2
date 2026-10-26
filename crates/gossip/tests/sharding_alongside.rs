@@ -81,6 +81,9 @@ async fn run(alongside: bool) -> Run {
         withdraw_on_stand_down: true,
         require_recent_contact: recent_contact(),
         announce_alongside: alongside,
+        coordinated_growth: coordinated_growth(),
+        critical_repair: true,
+        pinned: false,
     });
 
     let mut harnesses = Vec::new();

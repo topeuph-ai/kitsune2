@@ -41,6 +41,7 @@ mod tests {
                     vacate_end: (15 << 23) - 1,
                     expires_at_us: 1_234_567,
                     withdrawn: false,
+                    grow: false,
                 },
             )),
         };

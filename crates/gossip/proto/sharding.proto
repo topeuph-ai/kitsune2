@@ -42,4 +42,11 @@ message K2ShardingShrinkIntentMessage {
   // expiry: the sender stood down and keeps holding the range. Receivers
   // drop that intent at once instead of letting it age out.
   bool withdrawn = 5;
+
+  // True for an intent to GROW into the range rather than vacate it: the
+  // sender means to take the given range, which adjoins the arc it holds
+  // (V7 coordinated growth). Receivers that do not know this field read
+  // it as a vacate of a range the sender does not hold, which their
+  // declared-range check already discards, so mixing versions is safe.
+  bool grow = 6;
 }

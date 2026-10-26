@@ -108,6 +108,10 @@ async fn storm(patient_lowest: bool) {
         require_recent_contact: std::env::var("SHARDING_RECENT_CONTACT")
             .map_or(true, |v| v != "0"),
         announce_alongside: true,
+        coordinated_growth: std::env::var("SHARDING_COORDINATED_GROWTH")
+            .is_ok_and(|v| v == "1"),
+        critical_repair: true,
+        pinned: false,
     });
 
     // Seed some data so gossip rounds have something to verify.

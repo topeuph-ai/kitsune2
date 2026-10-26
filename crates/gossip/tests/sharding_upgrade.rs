@@ -71,6 +71,9 @@ fn v6(target: u32) -> K2ShardingConfig {
         withdraw_on_stand_down: true,
         require_recent_contact: recent_contact(),
         announce_alongside: true,
+        coordinated_growth: coordinated_growth(),
+        critical_repair: true,
+        pinned: false,
     }
 }
 

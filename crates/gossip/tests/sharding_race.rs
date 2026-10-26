@@ -113,6 +113,9 @@ async fn race_run(
         withdraw_on_stand_down: withdraw,
         require_recent_contact: recent_contact(),
         announce_alongside: true,
+        coordinated_growth: coordinated_growth(),
+        critical_repair: true,
+        pinned: false,
     });
 
     let a = factory.new_instance().await;

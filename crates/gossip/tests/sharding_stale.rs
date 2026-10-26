@@ -98,6 +98,9 @@ async fn stale_run(
         withdraw_on_stand_down: withdraw,
         require_recent_contact: recent_contact(),
         announce_alongside: true,
+        coordinated_growth: coordinated_growth(),
+        critical_repair: true,
+        pinned: false,
     });
 
     let mut nodes = Vec::with_capacity(NUM_NODES);

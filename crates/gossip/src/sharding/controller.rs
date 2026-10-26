@@ -4,7 +4,9 @@ use super::blocks::{
     MAX_LEVEL, block_arc, home_sector, sibling_half, vacate_half,
 };
 use super::coverage::{min_over, others_coverage, subtract_sectors};
-use super::intents::{IntentTable, ShrinkIntent, retain_declared};
+use super::intents::{
+    IntentTable, ShrinkIntent, retain_declared, retain_growers,
+};
 use super::protocol::{
     K2ShardingMessage, K2ShardingShrinkIntentMessage,
     deserialize_sharding_message, k2_sharding_message,
@@ -41,6 +43,9 @@ struct AgentControl {
     shrink_acc: Duration,
     /// An announced, not yet executed, shrink.
     pending: Option<PendingShrink>,
+    /// An announced, not yet executed, grow (V7 coordinated growth). Its
+    /// `vacate` field is the range to take.
+    pending_grow: Option<PendingShrink>,
 }
 
 #[derive(Debug)]
@@ -70,6 +75,8 @@ pub struct K2Sharding {
     peer_meta_store: Arc<K2PeerMetaStore>,
     transport: WeakDynTransport,
     intents: IntentTable,
+    /// Announced grows (V7 coordinated growth), same shape as shrinks.
+    grow_intents: IntentTable,
     states: Mutex<HashMap<AgentId, AgentControl>>,
     /// Peers seen as gone (unresponsive or tombstoned) last tick, to
     /// detect fresh departures.
@@ -102,6 +109,7 @@ impl K2Sharding {
             peer_meta_store,
             transport: Arc::downgrade(&transport),
             intents: IntentTable::default(),
+            grow_intents: IntentTable::default(),
             states: Mutex::new(HashMap::new()),
             last_gone: std::sync::Mutex::new(HashSet::new()),
             contact: std::sync::Mutex::new(HashMap::new()),
@@ -153,6 +161,7 @@ impl K2Sharding {
         let peers = self.peer_store.get_all().await?;
         let now = Timestamp::now();
         let live_intents = self.intents.live(now);
+        let mut live_grows = self.grow_intents.live(now);
         // Tests can make this node act on a view of the peer store and
         // the intent table that is a fixed time old, both from the same
         // instant, to exercise the stale-view race on a fast transport.
@@ -229,6 +238,7 @@ impl K2Sharding {
             );
         }
         retain_declared(&mut live_intents, &declared_arcs, &own_ids);
+        retain_growers(&mut live_grows, &declared_arcs, &own_ids);
         let lag = self.lag_estimate(&peers, &gone, now).await;
 
         // Coverage for shrink decisions: with `require_recent_contact`,
@@ -316,6 +326,7 @@ impl K2Sharding {
                         grow_acc: Duration::ZERO,
                         shrink_acc: Duration::ZERO,
                         pending: None,
+                        pending_grow: None,
                     }
                 });
 
@@ -325,6 +336,7 @@ impl K2Sharding {
                 cov,
                 shrink_cov,
                 &live_intents,
+                &live_grows,
                 visible_peers,
                 lag,
                 now,
@@ -352,6 +364,7 @@ impl K2Sharding {
         cov: Vec<u32>,
         shrink_cov: Vec<u32>,
         live_intents: &[(AgentId, ShrinkIntent)],
+        live_grows: &[(AgentId, ShrinkIntent)],
         visible_peers: usize,
         lag: Duration,
         now: Timestamp,
@@ -368,6 +381,13 @@ impl K2Sharding {
             }
             return;
         }
+        if let Some(pending) = &ctl.pending_grow {
+            if now >= pending.execute_at {
+                self.execute_grow(agent, ctl, &cov, live_intents, live_grows)
+                    .await;
+            }
+            return;
+        }
 
         // The declared arc must have caught up with the model before any
         // decision: a growing (or freshly joined, still empty) arc means
@@ -378,6 +398,14 @@ impl K2Sharding {
             return;
         }
         ctl.declared_level = ctl.target_level;
+
+        // Pinned: hold the full arc and never shrink.
+        if cfg.pinned {
+            if ctl.declared_level < MAX_LEVEL {
+                self.start_grow(agent, ctl);
+            }
+            return;
+        }
 
         // Small-network clamp: too few visible peers, hold a full arc.
         if (visible_peers as u32) < cfg.clamp_min_peers {
@@ -446,7 +474,7 @@ impl K2Sharding {
                     "sharding: grow cause: announced vacates only"
                 );
             }
-            self.start_grow(agent, ctl);
+            self.grow(agent, ctl, &cov, live_intents, lag, now).await;
         } else if shrink_cond && ctl.shrink_acc >= shrink_need {
             // Patient lowest: hold off while a lower id is racing us for
             // the same sectors. The accumulator is kept, so we announce
@@ -482,13 +510,123 @@ impl K2Sharding {
         ctl.grow_acc = Duration::ZERO;
         ctl.shrink_acc = Duration::ZERO;
         ctl.pending = None;
+        ctl.pending_grow = None;
         self.intents.remove(agent.agent());
+        self.grow_intents.remove(agent.agent());
         agent.set_tgt_storage_arc_hint(block_arc(ctl.home, ctl.target_level));
         tracing::debug!(
             agent = ?agent.agent(),
             level = ctl.target_level,
             "sharding: growing target arc"
         );
+    }
+
+    /// The grow decision. V6: grow at once. V7 (`coordinated_growth`):
+    /// announce the range and re-check after a wait, unless a sector of it
+    /// is down to one copy or none, which is repaired at once.
+    async fn grow(
+        &self,
+        agent: &DynLocalAgent,
+        ctl: &mut AgentControl,
+        cov: &[u32],
+        live_intents: &[(AgentId, ShrinkIntent)],
+        lag: Duration,
+        now: Timestamp,
+    ) {
+        let cfg = &self.config;
+        if !cfg.coordinated_growth {
+            return self.start_grow(agent, ctl);
+        }
+        let range = sibling_half(ctl.home, ctl.declared_level);
+        if cfg.critical_repair {
+            let eff = grow_view(cov, live_intents, agent.agent());
+            if min_over(&eff, range.0, range.1) <= 1 {
+                tracing::debug!(
+                    agent = ?agent.agent(),
+                    "sharding: critical repair, growing at once"
+                );
+                return self.start_grow(agent, ctl);
+            }
+        }
+        let wait = self.wait_for(lag);
+        let execute_at = now + wait;
+        let expires_at = execute_at + wait;
+        let DhtArc::Arc(start, end) =
+            super::blocks::sectors_to_arc(range.0, range.1)
+        else {
+            return self.start_grow(agent, ctl);
+        };
+        ctl.pending_grow = Some(PendingShrink {
+            execute_at,
+            vacate: range,
+            expires_at,
+            wait,
+        });
+        ctl.grow_acc = Duration::ZERO;
+        self.grow_intents.insert(
+            agent.agent().clone(),
+            ShrinkIntent {
+                vacate: range,
+                expires_at,
+                from: None,
+            },
+        );
+        tracing::debug!(
+            agent = ?agent.agent(),
+            ?range,
+            ?wait,
+            "sharding: announcing grow intent"
+        );
+        self.send_intent(agent, (start, end), expires_at, false, true)
+            .await;
+    }
+
+    /// Re-check an announced grow: take the range only if it is still
+    /// short counting every lower-id announced grower as already there.
+    async fn execute_grow(
+        &self,
+        agent: &DynLocalAgent,
+        ctl: &mut AgentControl,
+        cov: &[u32],
+        live_intents: &[(AgentId, ShrinkIntent)],
+        live_grows: &[(AgentId, ShrinkIntent)],
+    ) {
+        let Some(pending) = ctl.pending_grow.take() else {
+            return;
+        };
+        self.grow_intents.remove(agent.agent());
+        let range = pending.vacate;
+        let mut eff = grow_view(cov, live_intents, agent.agent());
+        for (id, intent) in live_grows {
+            if id < agent.agent() && overlaps(intent.vacate, range) {
+                add_sectors(&mut eff, intent.vacate.0, intent.vacate.1);
+            }
+        }
+        if min_over(&eff, range.0, range.1) < self.config.target_redundancy {
+            tracing::debug!(
+                agent = ?agent.agent(),
+                "sharding: executed coordinated grow"
+            );
+            self.start_grow(agent, ctl);
+        } else {
+            ctl.grow_acc = Duration::ZERO;
+            tracing::debug!(
+                agent = ?agent.agent(),
+                "sharding: grow intent stood down, already covered"
+            );
+            if let DhtArc::Arc(start, end) =
+                super::blocks::sectors_to_arc(range.0, range.1)
+            {
+                self.send_intent(
+                    agent,
+                    (start, end),
+                    pending.expires_at,
+                    true,
+                    true,
+                )
+                .await;
+            }
+        }
     }
 
     /// Phase one of a shrink: announce the intent and start the clock.
@@ -573,8 +711,14 @@ impl K2Sharding {
             },
         );
 
-        self.send_intent(agent, (vacate_start, vacate_end), expires_at, false)
-            .await;
+        self.send_intent(
+            agent,
+            (vacate_start, vacate_end),
+            expires_at,
+            false,
+            false,
+        )
+        .await;
     }
 
     /// Broadcast a withdrawal of this agent's intent with the given
@@ -590,8 +734,14 @@ impl K2Sharding {
         else {
             return;
         };
-        self.send_intent(agent, (vacate_start, vacate_end), expires_at, true)
-            .await;
+        self.send_intent(
+            agent,
+            (vacate_start, vacate_end),
+            expires_at,
+            true,
+            false,
+        )
+        .await;
     }
 
     async fn send_intent(
@@ -600,6 +750,7 @@ impl K2Sharding {
         (vacate_start, vacate_end): (u32, u32),
         expires_at: Timestamp,
         withdrawn: bool,
+        grow: bool,
     ) {
         let msg = serialize_sharding_message(K2ShardingMessage {
             msg: Some(k2_sharding_message::Msg::ShrinkIntent(
@@ -609,6 +760,7 @@ impl K2Sharding {
                     vacate_end,
                     expires_at_us: expires_at.as_micros(),
                     withdrawn,
+                    grow,
                 },
             )),
         });
@@ -962,6 +1114,33 @@ fn lower_racer(
         .any(|(id, i)| id < own_id && overlaps(i.vacate, vacate))
 }
 
+/// The coverage a grower judges a range by: what it sees, with every
+/// other agent's announced vacate counted as already gone.
+fn grow_view(
+    cov: &[u32],
+    live_intents: &[(AgentId, ShrinkIntent)],
+    own_id: &AgentId,
+) -> Vec<u32> {
+    let mut eff = cov.to_vec();
+    for (id, intent) in live_intents {
+        if id != own_id {
+            subtract_sectors(&mut eff, intent.vacate.0, intent.vacate.1);
+        }
+    }
+    eff
+}
+
+/// Add one copy to every sector of `[start, end)`.
+fn add_sectors(cov: &mut [u32], start: u32, end: u32) {
+    for c in cov
+        .iter_mut()
+        .skip(start as usize)
+        .take((end - start) as usize)
+    {
+        *c += 1;
+    }
+}
+
 /// Is there room for us to vacate alongside every lower-id agent racing
 /// us for `vacate`? `cov` is the coverage this agent sees without itself;
 /// each lower-id racer overlapping the range counts as gone.
@@ -1053,13 +1232,14 @@ impl TxModuleHandler for K2Sharding {
         match msg.msg {
             Some(k2_sharding_message::Msg::ShrinkIntent(intent)) => {
                 let expires_at = Timestamp::from_micros(intent.expires_at_us);
+                let table = if intent.grow {
+                    &self.grow_intents
+                } else {
+                    &self.intents
+                };
                 if intent.withdrawn {
                     let agent = AgentId::from(intent.agent_id);
-                    if self.intents.withdraw(
-                        agent.clone(),
-                        Some(peer),
-                        expires_at,
-                    ) {
+                    if table.withdraw(agent.clone(), Some(peer), expires_at) {
                         tracing::debug!(
                             agent = ?agent,
                             "sharding: applied a withdrawal from its sender"
@@ -1087,7 +1267,7 @@ impl TxModuleHandler for K2Sharding {
                 if vacate.1 - vacate.0 > super::blocks::NUM_SECTORS / 2 {
                     return Ok(());
                 }
-                self.intents.insert(
+                table.insert(
                     AgentId::from(intent.agent_id),
                     ShrinkIntent {
                         vacate,

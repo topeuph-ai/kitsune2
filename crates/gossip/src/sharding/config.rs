@@ -193,6 +193,38 @@ pub struct K2ShardingConfig {
     /// Default: true
     #[cfg_attr(feature = "schema", schemars(default))]
     pub announce_alongside: bool,
+
+    /// Coordinate growing as well as shrinking (V7).
+    ///
+    /// Without it, every agent that sees a short sector grows on its own,
+    /// so one gap can draw several growers. With it, an agent announces
+    /// the range it means to take, waits as for a shrink, and re-checks:
+    /// it grows only if the range is still short counting every lower-id
+    /// agent that has announced growing into it as already there;
+    /// otherwise it stands down. Growing below the small-network clamp,
+    /// and a critical repair (see `critical_repair`), happen at once.
+    ///
+    /// Default: false (V7 is under test)
+    #[cfg_attr(feature = "schema", schemars(default))]
+    pub coordinated_growth: bool,
+
+    /// With `coordinated_growth`, grow at once, without announcing, when a
+    /// sector of the range is down to one copy or none.
+    ///
+    /// Default: true
+    #[cfg_attr(feature = "schema", schemars(default))]
+    pub critical_repair: bool,
+
+    /// Keep the full arc and never shrink.
+    ///
+    /// For a machine that should hold everything: a server, or a site's
+    /// main machine that must keep the whole network available to that
+    /// site when it is cut off from the rest. Other agents count it like
+    /// any holder.
+    ///
+    /// Default: false
+    #[cfg_attr(feature = "schema", schemars(default))]
+    pub pinned: bool,
 }
 
 impl Default for K2ShardingConfig {
@@ -212,6 +244,9 @@ impl Default for K2ShardingConfig {
             withdraw_on_stand_down: true,
             require_recent_contact: true,
             announce_alongside: true,
+            coordinated_growth: false,
+            critical_repair: true,
+            pinned: false,
         }
     }
 }
@@ -245,6 +280,9 @@ mod tests {
         assert!(c.withdraw_on_stand_down);
         assert!(c.require_recent_contact);
         assert!(c.announce_alongside);
+        assert!(!c.coordinated_growth);
+        assert!(c.critical_repair);
+        assert!(!c.pinned);
         assert!(!c.agentinfo_encoding);
     }
 }
