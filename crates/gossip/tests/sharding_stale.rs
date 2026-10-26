@@ -101,7 +101,7 @@ async fn stale_run(
         coordinated_growth: coordinated_growth(),
         critical_repair: true,
         pinned: false,
-        probe_sibling_holders: true,
+        probe_sibling_holders: probe_holders(),
         probe_interval_ms: 1_000,
     });
 

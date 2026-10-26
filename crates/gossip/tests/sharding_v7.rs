@@ -53,14 +53,9 @@ fn config(target: u32, coordinated: bool, pinned: bool) -> K2ShardingConfig {
         coordinated_growth: coordinated,
         critical_repair: true,
         pinned,
-        probe_sibling_holders: probe(),
+        probe_sibling_holders: probe_holders(),
         probe_interval_ms: 1_000,
     }
-}
-
-/// Probing on unless `SHARDING_PROBE=0`, to compare.
-fn probe() -> bool {
-    std::env::var("SHARDING_PROBE").map_or(true, |v| v != "0")
 }
 
 async fn factory() -> K2GossipFunctionalTestFactory {

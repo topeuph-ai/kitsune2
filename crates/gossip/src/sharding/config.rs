@@ -233,8 +233,9 @@ pub struct K2ShardingConfig {
     /// marked unresponsive only when a send to it fails. Once a network has
     /// sharded, an agent never contacts the holders of the half it would
     /// grow into, so their deaths went unnoticed and the gaps they left
-    /// stayed hidden until their agent info expired (5 minutes by
-    /// default). A probe is an empty message; when it fails, the holder is
+    /// stayed hidden until their agent info expired (agent infos are valid
+    /// for 20 minutes and re-signed when under 5 remain, so up to about 20
+    /// minutes). A probe is an empty message; when it fails, the holder is
     /// marked unresponsive and the gap shows.
     ///
     /// Default: true

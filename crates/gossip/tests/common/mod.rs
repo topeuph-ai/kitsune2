@@ -45,6 +45,12 @@ pub const GROW_STOOD_DOWN: &str =
     "sharding: grow intent stood down, already covered";
 pub const CRITICAL_REPAIR: &str = "sharding: critical repair, growing at once";
 
+/// Whether the functional tests probe sibling-half holders: on unless
+/// `SHARDING_PROBE=0`.
+pub fn probe_holders() -> bool {
+    std::env::var("SHARDING_PROBE").map_or(true, |v| v != "0")
+}
+
 /// Sharding-module log events, `(agent, message)`, in arrival order.
 pub type Events = Arc<Mutex<Vec<(String, String)>>>;
 

@@ -260,19 +260,7 @@ impl K2Sharding {
         // in rotation, so healthy peers routinely go unheard for a while.
         // And deaths are marked quickly: on the in-memory transport, all
         // killed peers within 12 s, most within 2 s; see sharding_detect.)
-        // Backstop for a death no probe has caught: a holder whose agent
-        // info is older than half its validity has stopped re-signing it
-        // (agents re-sign well inside that), so it is presumed dead.
-        let grow_base_cov = {
-            let mut skip = gone.clone();
-            skip.extend(
-                peers
-                    .iter()
-                    .filter(|p| stale_info(p, now))
-                    .map(|p| p.agent.clone()),
-            );
-            others_coverage(&peers, &skip)
-        };
+        let grow_base_cov = base_cov.clone();
 
         let mut states = self.states.lock().await;
 
@@ -1234,23 +1222,6 @@ fn lower_racer(
         .any(|(id, i)| id < own_id && overlaps(i.vacate, vacate))
 }
 
-/// Has this agent info gone stale? Agents re-sign their info well inside
-/// its validity (every minute, for five minutes, by default), so one
-/// older than half its validity belongs to an agent that has stopped.
-fn stale_info(info: &AgentInfoSigned, now: Timestamp) -> bool {
-    stale_by(info.created_at, info.expires_at, now)
-}
-
-fn stale_by(
-    created_at: Timestamp,
-    expires_at: Timestamp,
-    now: Timestamp,
-) -> bool {
-    let valid = (expires_at - created_at).unwrap_or_default();
-    let age = (now - created_at).unwrap_or_default();
-    age > valid / 2
-}
-
 /// The coverage a grower judges a range by: what it sees, with every
 /// other agent's announced vacate counted as already gone.
 fn grow_view(
@@ -1783,21 +1754,6 @@ mod tests {
         // With exactly the target besides us, no lower racer fits.
         let thin = vec![r; NUM_SECTORS as usize];
         assert!(!room_alongside(&thin, &one, &me, (0, 8), r));
-    }
-
-    /// Agent infos last five minutes and are re-signed every minute: a
-    /// fresh or recently re-signed one is live, one not re-signed for over
-    /// half its validity is stale.
-    #[test]
-    fn agent_info_goes_stale_after_half_its_validity() {
-        let created = Timestamp::now();
-        let expires = created + Duration::from_secs(300);
-        let at = |s| created + Duration::from_secs(s);
-        assert!(!stale_by(created, expires, at(0)));
-        assert!(!stale_by(created, expires, at(60)));
-        assert!(!stale_by(created, expires, at(150)));
-        assert!(stale_by(created, expires, at(151)));
-        assert!(stale_by(created, expires, at(400)));
     }
 
     /// Ranges that only touch neither overlap nor block a re-check.
