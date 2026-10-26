@@ -107,6 +107,7 @@ fn config(wait_ms: u32) -> K2ShardingConfig {
         patient_lowest: true,
         withdraw_on_stand_down: true,
         require_recent_contact: recent_contact(),
+        announce_alongside: true,
     }
 }
 

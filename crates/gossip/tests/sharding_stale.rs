@@ -97,6 +97,7 @@ async fn stale_run(
         patient_lowest,
         withdraw_on_stand_down: withdraw,
         require_recent_contact: recent_contact(),
+        announce_alongside: true,
     });
 
     let mut nodes = Vec::with_capacity(NUM_NODES);

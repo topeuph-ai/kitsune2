@@ -107,6 +107,7 @@ async fn storm(patient_lowest: bool) {
         // As `common::recent_contact` (this file does not use `common`).
         require_recent_contact: std::env::var("SHARDING_RECENT_CONTACT")
             .map_or(true, |v| v != "0"),
+        announce_alongside: true,
     });
 
     // Seed some data so gossip rounds have something to verify.

@@ -177,6 +177,22 @@ pub struct K2ShardingConfig {
     /// Default: true
     #[cfg_attr(feature = "schema", schemars(default))]
     pub require_recent_contact: bool,
+
+    /// Let an agent announce a shrink alongside lower-id agents racing it
+    /// for the same range, when there is room for all of them.
+    ///
+    /// Without it, an agent never announces while a lower id is announcing
+    /// for an overlapping range, so agents sharing a range shrink one at a
+    /// time. From full arcs every agent's first shrink drops one of the
+    /// same two halves, and sharding down can then be several times slower
+    /// than it needs to be (polite-shrink `reports/REPORT_v7.md`). With it,
+    /// an agent holds off only if, counting itself and every lower-id
+    /// racer as gone, its half would keep fewer than `target_redundancy`
+    /// copies. The re-check is unchanged, so this cannot affect safety.
+    ///
+    /// Default: true
+    #[cfg_attr(feature = "schema", schemars(default))]
+    pub announce_alongside: bool,
 }
 
 impl Default for K2ShardingConfig {
@@ -195,6 +211,7 @@ impl Default for K2ShardingConfig {
             patient_lowest: true,
             withdraw_on_stand_down: true,
             require_recent_contact: true,
+            announce_alongside: true,
         }
     }
 }
@@ -227,6 +244,7 @@ mod tests {
         assert!(c.patient_lowest);
         assert!(c.withdraw_on_stand_down);
         assert!(c.require_recent_contact);
+        assert!(c.announce_alongside);
         assert!(!c.agentinfo_encoding);
     }
 }

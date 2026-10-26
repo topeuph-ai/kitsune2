@@ -77,6 +77,7 @@ async fn storm_over_iroh(num_nodes: usize) -> StormStats {
         patient_lowest: true,
         withdraw_on_stand_down: true,
         require_recent_contact: recent_contact(),
+        announce_alongside: true,
     })
     .with_transport(
         IrohTransportFactory::create(),

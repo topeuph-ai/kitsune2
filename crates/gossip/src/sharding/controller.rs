@@ -453,7 +453,16 @@ impl K2Sharding {
             // as soon as it clears.
             if self.patient() {
                 let (vs, ve) = vacate_half(ctl.home, ctl.declared_level);
-                if lower_racer(live_intents, agent.agent(), (vs, ve)) {
+                if lower_racer(live_intents, agent.agent(), (vs, ve))
+                    && !(cfg.announce_alongside
+                        && room_alongside(
+                            &shrink_cov,
+                            live_intents,
+                            agent.agent(),
+                            (vs, ve),
+                            cfg.target_redundancy,
+                        ))
+                {
                     return;
                 }
             }
@@ -953,6 +962,25 @@ fn lower_racer(
         .any(|(id, i)| id < own_id && overlaps(i.vacate, vacate))
 }
 
+/// Is there room for us to vacate alongside every lower-id agent racing
+/// us for `vacate`? `cov` is the coverage this agent sees without itself;
+/// each lower-id racer overlapping the range counts as gone.
+fn room_alongside(
+    cov: &[u32],
+    live_intents: &[(AgentId, ShrinkIntent)],
+    own_id: &AgentId,
+    vacate: (u32, u32),
+    target_redundancy: u32,
+) -> bool {
+    let mut eff = cov.to_vec();
+    for (id, intent) in live_intents {
+        if id < own_id && overlaps(intent.vacate, vacate) {
+            subtract_sectors(&mut eff, intent.vacate.0, intent.vacate.1);
+        }
+    }
+    min_over(&eff, vacate.0, vacate.1) >= target_redundancy
+}
+
 /// The patient-lowest (V6) re-check.
 ///
 /// Every announced intender overlapping our vacate range counts as
@@ -1410,8 +1438,37 @@ mod tests {
         );
     }
 
-    /// Disjoint intents, from either side of us in id order, neither
-    /// count nor make us wait.
+    /// Announcing alongside lower ids: allowed only while the range keeps
+    /// the target counting us and every lower-id racer as gone. Higher-id
+    /// racers and disjoint ones do not count.
+    #[test]
+    fn room_alongside_counts_lower_racers_only() {
+        let r = 3;
+        let me = agent(b"mmm");
+        // 5 copies besides us: room for us and one lower racer (3 left)...
+        let cov = vec![5; NUM_SECTORS as usize];
+        let one = vec![(agent(b"aaa"), intent((0, 8)))];
+        assert!(room_alongside(&cov, &one, &me, (0, 8), r));
+        // ... but not for us and three lower racers (1 left).
+        let three = vec![
+            (agent(b"aaa"), intent((0, 8))),
+            (agent(b"bbb"), intent((0, 8))),
+            (agent(b"ccc"), intent((4, 12))),
+        ];
+        assert!(!room_alongside(&cov, &three, &me, (0, 8), r));
+        // Higher-id and disjoint racers are not counted.
+        let others = vec![
+            (agent(b"zzz"), intent((0, 8))),
+            (agent(b"yyy"), intent((0, 8))),
+            (agent(b"aaa"), intent((100, 108))),
+        ];
+        assert!(room_alongside(&cov, &others, &me, (0, 8), r));
+        // With exactly the target besides us, no lower racer fits.
+        let thin = vec![r; NUM_SECTORS as usize];
+        assert!(!room_alongside(&thin, &one, &me, (0, 8), r));
+    }
+
+    /// Ranges that only touch neither overlap nor block a re-check.
     #[test]
     fn adjacent_ranges_do_not_overlap() {
         // Half-open ranges that only touch share no sector.
@@ -1429,6 +1486,8 @@ mod tests {
         assert!(!lower_racer(&intents, &me, (0, 8)));
     }
 
+    /// Disjoint intents, from either side of us in id order, neither
+    /// count nor make us wait.
     #[test]
     fn patient_ignores_disjoint_intents() {
         let r = 3;
