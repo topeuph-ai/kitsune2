@@ -244,7 +244,22 @@ impl K2Sharding {
         // Coverage for shrink decisions: with `require_recent_contact`,
         // only holders heard from within the current wait count.
         let shrink_base_cov = if self.config.require_recent_contact {
-            let silent = self.silent_peers(&peers, &gone, lag, now).await;
+            let silent = self.silent_peers(&peers, &gone, lag, now, 1.0).await;
+            let mut skip = gone.clone();
+            skip.extend(silent);
+            others_coverage(&peers, &skip)
+        } else {
+            base_cov.clone()
+        };
+        // Coverage for grow decisions: a holder silent for GROW_SILENCE
+        // waits is presumed dead, so a death that the transport has not
+        // marked yet still shows as a gap to repair. Shorter silences are
+        // ordinary gossip rotation and still count, or healthy peers would
+        // look like gaps and set off needless grows.
+        let grow_base_cov = if self.config.require_recent_contact {
+            let silent = self
+                .silent_peers(&peers, &gone, lag, now, GROW_SILENCE)
+                .await;
             let mut skip = gone.clone();
             skip.extend(silent);
             others_coverage(&peers, &skip)
@@ -305,12 +320,12 @@ impl K2Sharding {
         for agent in &local_agents {
             // The declared redundancy this agent sees around itself:
             // remote peers plus sibling local agents, excluding itself.
-            let mut cov = base_cov.clone();
             let mut shrink_cov = shrink_base_cov.clone();
+            let mut grow_cov = grow_base_cov.clone();
             for other in &local_agents {
                 if other.agent() != agent.agent() {
-                    add_cur_arc(&mut cov, &other.get_cur_storage_arc());
                     add_cur_arc(&mut shrink_cov, &other.get_cur_storage_arc());
+                    add_cur_arc(&mut grow_cov, &other.get_cur_storage_arc());
                 }
             }
 
@@ -333,8 +348,8 @@ impl K2Sharding {
             self.tick_agent(
                 agent,
                 ctl,
-                cov,
                 shrink_cov,
+                grow_cov,
                 &live_intents,
                 &live_grows,
                 visible_peers,
@@ -361,8 +376,8 @@ impl K2Sharding {
         &self,
         agent: &DynLocalAgent,
         ctl: &mut AgentControl,
-        cov: Vec<u32>,
         shrink_cov: Vec<u32>,
+        grow_cov: Vec<u32>,
         live_intents: &[(AgentId, ShrinkIntent)],
         live_grows: &[(AgentId, ShrinkIntent)],
         visible_peers: usize,
@@ -371,16 +386,6 @@ impl K2Sharding {
         elapsed: Duration,
     ) {
         let cfg = &self.config;
-        // Growth protects the floor, so it reads silence the same cautious
-        // way shrinking does: with require_recent_contact, a holder not
-        // heard from within the wait does not count. Otherwise a holder
-        // that died silently would hide the gap it left until the
-        // transport marks it unresponsive.
-        let grow_cov = if cfg.require_recent_contact {
-            shrink_cov.clone()
-        } else {
-            cov.clone()
-        };
 
         // Phase two of an announced shrink; no other decisions while an
         // intent is pending.
@@ -913,8 +918,9 @@ impl K2Sharding {
         gone: &HashSet<AgentId>,
         lag: Duration,
         now: Timestamp,
+        lease_factor: f64,
     ) -> HashSet<AgentId> {
-        let lease = self.wait_for(lag);
+        let lease = self.wait_for(lag).mul_f64(lease_factor);
         // Tests that make the view a fixed time old make contact that old
         // too: nothing in a view `d` old can be fresher than `d`.
         #[cfg(any(test, feature = "test-utils"))]
@@ -1130,6 +1136,13 @@ fn lower_racer(
         .iter()
         .any(|(id, i)| id < own_id && overlaps(i.vacate, vacate))
 }
+
+/// How many waits a holder may stay silent before grow decisions presume
+/// it dead. One wait is too short: gossip reaches peers in rotation, so
+/// healthy peers routinely go a wait unheard, and counting them out set
+/// off needless grows (3x the announcements in sharding_alongside). Three
+/// waits still catch a silent death within seconds.
+const GROW_SILENCE: f64 = 3.0;
 
 /// The coverage a grower judges a range by: what it sees, with every
 /// other agent's announced vacate counted as already gone.
