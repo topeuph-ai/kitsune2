@@ -244,28 +244,20 @@ impl K2Sharding {
         // Coverage for shrink decisions: with `require_recent_contact`,
         // only holders heard from within the current wait count.
         let shrink_base_cov = if self.config.require_recent_contact {
-            let silent = self.silent_peers(&peers, &gone, lag, now, 1.0).await;
+            let silent = self.silent_peers(&peers, &gone, lag, now).await;
             let mut skip = gone.clone();
             skip.extend(silent);
             others_coverage(&peers, &skip)
         } else {
             base_cov.clone()
         };
-        // Coverage for grow decisions: a holder silent for GROW_SILENCE
-        // waits is presumed dead, so a death that the transport has not
-        // marked yet still shows as a gap to repair. Shorter silences are
-        // ordinary gossip rotation and still count, or healthy peers would
-        // look like gaps and set off needless grows.
-        let grow_base_cov = if self.config.require_recent_contact {
-            let silent = self
-                .silent_peers(&peers, &gone, lag, now, GROW_SILENCE)
-                .await;
-            let mut skip = gone.clone();
-            skip.extend(silent);
-            others_coverage(&peers, &skip)
-        } else {
-            base_cov.clone()
-        };
+        // Coverage for grow decisions: every holder not marked
+        // unresponsive, as under V6. (Reading silence as absence here, as
+        // shrink decisions do, set off needless grows: gossip reaches peers
+        // in rotation, so healthy peers routinely go unheard for a while.
+        // And deaths are marked quickly: on the in-memory transport, all
+        // killed peers within 12 s, most within 2 s; see sharding_detect.)
+        let grow_base_cov = base_cov.clone();
 
         let mut states = self.states.lock().await;
 
@@ -918,9 +910,8 @@ impl K2Sharding {
         gone: &HashSet<AgentId>,
         lag: Duration,
         now: Timestamp,
-        lease_factor: f64,
     ) -> HashSet<AgentId> {
-        let lease = self.wait_for(lag).mul_f64(lease_factor);
+        let lease = self.wait_for(lag);
         // Tests that make the view a fixed time old make contact that old
         // too: nothing in a view `d` old can be fresher than `d`.
         #[cfg(any(test, feature = "test-utils"))]
@@ -1136,13 +1127,6 @@ fn lower_racer(
         .iter()
         .any(|(id, i)| id < own_id && overlaps(i.vacate, vacate))
 }
-
-/// How many waits a holder may stay silent before grow decisions presume
-/// it dead. One wait is too short: gossip reaches peers in rotation, so
-/// healthy peers routinely go a wait unheard, and counting them out set
-/// off needless grows (3x the announcements in sharding_alongside). Three
-/// waits still catch a silent death within seconds.
-const GROW_SILENCE: f64 = 3.0;
 
 /// The coverage a grower judges a range by: what it sees, with every
 /// other agent's announced vacate counted as already gone.

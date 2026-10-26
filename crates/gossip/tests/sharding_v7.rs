@@ -147,6 +147,8 @@ struct Herd {
     short_end: usize,
     /// ... of which some agent's sibling half contains them.
     short_reachable: usize,
+    /// Agents whose declared arc lags their target, with both ranges.
+    mid_grow: Vec<String>,
 }
 
 async fn herd(coordinated: bool) -> Herd {
@@ -213,6 +215,64 @@ async fn herd(coordinated: bool) -> Herd {
     // comes one wait, at most 2.5 x the 2 s lag ceiling, after announcing).
     tokio::time::sleep(Duration::from_secs(12)).await;
     let end_view = view(&nodes).await;
+    // How out of date are the survivors' peer stores? For each survivor,
+    // count live agents whose arc in that store differs from the arc they
+    // actually declare now, and dead agents still listed and not marked
+    // unresponsive.
+    let live: std::collections::HashMap<String, Option<(u32, u32)>> =
+        end_view.iter().map(|(a, _, r)| (a.clone(), *r)).collect();
+    let mut stale_arcs = 0;
+    let mut wider = 0;
+    let mut dead_listed = 0;
+    for (h, _) in &nodes {
+        for info in h.space.peer_store().get_all().await.unwrap() {
+            let id = format!("{:?}", info.agent);
+            match live.get(&id) {
+                Some(actual) => {
+                    let seen = sectors(info.storage_arc);
+                    if seen != *actual {
+                        stale_arcs += 1;
+                        let w =
+                            |r: Option<(u32, u32)>| r.map_or(0, |(s, e)| e - s);
+                        if w(seen) > w(*actual) {
+                            wider += 1;
+                        }
+                    }
+                }
+                None => {
+                    let unresponsive = match info.url.clone() {
+                        Some(u) => matches!(
+                            h.space.peer_meta_store().get_unresponsive(u).await,
+                            Ok(Some(_))
+                        ),
+                        None => false,
+                    };
+                    if !info.is_tombstone && !unresponsive {
+                        dead_listed += 1;
+                    }
+                }
+            }
+        }
+    }
+    println!(
+        "peer stores: {stale_arcs} out-of-date arcs ({wider} wider than          actual), {dead_listed} dead agents listed and not marked"
+    );
+    // Agents whose declared arc has not caught up with their target: a
+    // grow still syncing, or stuck. The controller makes no decision for
+    // such an agent until it catches up.
+    let mut mid_grow = Vec::new();
+    for (h, _) in &nodes {
+        for a in h.space.local_agent_store().get_all().await.unwrap() {
+            let (cur, tgt) = (a.get_cur_storage_arc(), a.get_tgt_storage_arc());
+            if cur != tgt {
+                mid_grow.push(format!(
+                    "cur {:?} tgt {:?}",
+                    sectors(cur),
+                    sectors(tgt)
+                ));
+            }
+        }
+    }
     let end_cov = coverage(&end_view);
     let short_end = end_cov.iter().filter(|&&c| c < TARGET).count();
     // How many short sectors lie in some agent's sibling half, the only
@@ -246,6 +306,7 @@ async fn herd(coordinated: bool) -> Herd {
         min_end,
         short_end,
         short_reachable: reachable,
+        mid_grow,
     }
 }
 
