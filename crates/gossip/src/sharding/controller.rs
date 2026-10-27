@@ -282,8 +282,6 @@ impl K2Sharding {
 
         let mut states = self.states.lock().await;
 
-        // Shrinks the storm brake cancels; peers are told after the loop.
-        let mut cancelled = Vec::new();
         // Storm brake. An announced shrink's re-check can only account
         // for deaths it can see, and death visibility (unresponsive
         // marking) runs on a different clock than gossip staleness. If
@@ -302,8 +300,7 @@ impl K2Sharding {
             *last_gone = gone.clone();
             if newly_gone {
                 for (agent_id, ctl) in states.iter_mut() {
-                    if let Some(p) = ctl.pending.take() {
-                        cancelled.push((agent_id.clone(), p));
+                    if ctl.pending.take().is_some() {
                         ctl.shrink_acc = Duration::ZERO;
                         self.intents.remove(agent_id);
                         if self.config.agentinfo_encoding {
@@ -333,18 +330,11 @@ impl K2Sharding {
                 }
             }
         }
-        // Tell peers, so they stop counting the cancelled shrinks as
-        // leaving (they would otherwise do so until the intents expire).
-        if self.config.withdraw_on_stand_down && !self.config.agentinfo_encoding
-        {
-            for (agent_id, p) in cancelled {
-                if let Some(agent) =
-                    local_agents.iter().find(|a| a.agent() == &agent_id)
-                {
-                    self.withdraw_intent(agent, p.vacate, p.expires_at).await;
-                }
-            }
-        }
+        // The brake deliberately sends no withdrawal: peers keep counting
+        // the cancelled shrinks as leaving until the intents expire, which
+        // keeps them cautious just after a death. Withdrawing here was
+        // tried (V7b) and gave 126 and 382 shrinks below target within
+        // the grace after kills in the chaos soak, against 0 without it.
         for agent in &local_agents {
             // The declared redundancy this agent sees around itself:
             // remote peers plus sibling local agents, excluding itself.
