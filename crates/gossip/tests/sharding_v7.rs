@@ -141,6 +141,10 @@ struct Herd {
     grow_announced: usize,
     grow_executed: usize,
     grow_stood_down: usize,
+    /// Announced grows repaired at once when the range fell to one copy.
+    critical_while_pending: usize,
+    /// Re-checks where the lowest grower waited for higher ones.
+    grow_waited: usize,
     /// Grow withdrawals applied by receivers.
     grow_withdrawals: usize,
     critical: usize,
@@ -305,6 +309,8 @@ async fn herd(coordinated: bool) -> Herd {
         grow_announced: count(GROW_ANNOUNCED),
         grow_executed: count(GROW_EXECUTED),
         grow_stood_down: count(GROW_STOOD_DOWN),
+        critical_while_pending: count(CRITICAL_WHILE_PENDING),
+        grow_waited: count(GROW_WAITED),
         grow_withdrawals: count(GROW_WITHDRAWAL_APPLIED),
         critical: count(CRITICAL_REPAIR),
         holes_in_grace,
@@ -330,13 +336,13 @@ async fn growth_repairs_deaths_with_and_without_coordination() {
         println!("coordinated growth {coordinated}: {h:?}");
         assert_eq!(
             0, h.short_reachable,
-            "short sectors that an agent could grow into were not repaired              (coordinated {coordinated}): {h:?}"
+            "short sectors that an agent could grow into were not repaired (coordinated {coordinated}): {h:?}"
         );
         if coordinated {
             assert_eq!(
                 h.grow_announced,
-                h.grow_executed + h.grow_stood_down,
-                "an announced grow was neither executed nor stood down: {h:?}"
+                h.grow_executed + h.grow_stood_down + h.critical_while_pending,
+                "an announced grow had no outcome: {h:?}"
             );
             // A grower that stands down tells the others, who drop its
             // intent at once instead of counting it as arriving.

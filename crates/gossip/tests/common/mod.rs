@@ -45,6 +45,9 @@ pub const GROW_STOOD_DOWN: &str =
     "sharding: grow intent stood down, already covered";
 pub const GROW_WITHDRAWAL_APPLIED: &str =
     "sharding: applied a grow withdrawal from its sender";
+pub const GROW_WAITED: &str = "sharding: lowest grower waiting at re-check";
+pub const CRITICAL_WHILE_PENDING: &str =
+    "sharding: critical repair while a grow was pending";
 pub const CRITICAL_REPAIR: &str = "sharding: critical repair, growing at once";
 
 /// Whether the functional tests probe sibling-half holders: on unless

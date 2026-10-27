@@ -126,15 +126,21 @@ pub(crate) fn retain_declared(
 
 /// Keep only grow intents that come from their agent's declared URL and
 /// name the half adjoining the arc that agent declares: the only range an
-/// agent can grow into. Our own agents' intents are kept as recorded.
+/// agent can grow into. Intents from agents in `gone` (marked
+/// unresponsive) are dropped: a dead grower brings no copy. Our own
+/// agents' intents are kept as recorded.
 pub(crate) fn retain_growers(
     live: &mut Vec<(AgentId, ShrinkIntent)>,
     declared: &HashMap<AgentId, (DhtArc, Option<Url>)>,
     own_ids: &HashSet<AgentId>,
+    gone: &HashSet<AgentId>,
 ) {
     live.retain(|(agent, intent)| {
         if own_ids.contains(agent) {
             return intent.from.is_none();
+        }
+        if gone.contains(agent) {
+            return false;
         }
         declared.get(agent).is_some_and(|(arc, url)| {
             url.is_some()
@@ -307,7 +313,7 @@ mod tests {
             // own agents bypass validation
             (agent(b"me"), local((0, 8))),
         ];
-        retain_growers(&mut live, &declared, &own);
+        retain_growers(&mut live, &declared, &own, &HashSet::new());
         let kept: Vec<_> =
             live.iter().map(|(a, i)| (a.clone(), i.vacate)).collect();
         assert_eq!(
@@ -326,8 +332,20 @@ mod tests {
                 ..intent((24, 32))
             },
         )];
-        retain_growers(&mut wrong, &declared, &own);
+        retain_growers(&mut wrong, &declared, &own, &HashSet::new());
         assert!(wrong.is_empty());
+        // A grower marked unresponsive is dropped; our own agents (which
+        // the controller also puts in `gone`) are not.
+        let mut dead = vec![
+            (agent(b"small"), intent((24, 32))),
+            (agent(b"me"), local((0, 8))),
+        ];
+        let gone: HashSet<AgentId> = [agent(b"small"), agent(b"me")].into();
+        retain_growers(&mut dead, &declared, &own, &gone);
+        assert_eq!(
+            vec![agent(b"me")],
+            dead.into_iter().map(|(a, _)| a).collect::<Vec<_>>()
+        );
     }
 
     #[test]

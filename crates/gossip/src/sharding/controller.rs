@@ -46,6 +46,10 @@ struct AgentControl {
     /// An announced, not yet executed, grow (V7 coordinated growth). Its
     /// `vacate` field is the range to take.
     pending_grow: Option<PendingShrink>,
+    /// A coordinated grow that has been executed and is being synced. Its
+    /// intent is kept announced until the declared arc covers the range,
+    /// so peers do not grow into the same range while the data arrives.
+    syncing_grow: Option<PendingShrink>,
 }
 
 #[derive(Debug)]
@@ -164,13 +168,14 @@ impl K2Sharding {
         let peers = self.peer_store.get_all().await?;
         let now = Timestamp::now();
         let live_intents = self.intents.live(now);
-        let mut live_grows = self.grow_intents.live(now);
+        let live_grows = self.grow_intents.live(now);
         // Tests can make this node act on a view of the peer store and
-        // the intent table that is a fixed time old, both from the same
+        // the intent tables that is a fixed time old, all from the same
         // instant, to exercise the stale-view race on a fast transport.
         #[cfg(any(test, feature = "test-utils"))]
-        let (peers, live_intents) =
-            self.view_delay.apply(now, peers, live_intents);
+        let (peers, live_intents, live_grows) =
+            self.view_delay.apply(now, peers, live_intents, live_grows);
+        let mut live_grows = live_grows;
 
         let own_ids = local_agents
             .iter()
@@ -241,7 +246,20 @@ impl K2Sharding {
             );
         }
         retain_declared(&mut live_intents, &declared_arcs, &own_ids);
-        retain_growers(&mut live_grows, &declared_arcs, &own_ids);
+        retain_growers(&mut live_grows, &declared_arcs, &own_ids, &gone);
+        // Per-peer bookkeeping only for peers still in the store.
+        {
+            let urls: HashSet<&Url> =
+                peers.iter().filter_map(|p| p.url.as_ref()).collect();
+            self.contact
+                .lock()
+                .expect("poisoned")
+                .retain(|u, _| urls.contains(u));
+            self.last_probe
+                .lock()
+                .expect("poisoned")
+                .retain(|u, _| urls.contains(u));
+        }
         let lag = self.lag_estimate(&peers, &gone, now).await;
 
         // Coverage for shrink decisions: with `require_recent_contact`,
@@ -264,6 +282,8 @@ impl K2Sharding {
 
         let mut states = self.states.lock().await;
 
+        // Shrinks the storm brake cancels; peers are told after the loop.
+        let mut cancelled = Vec::new();
         // Storm brake. An announced shrink's re-check can only account
         // for deaths it can see, and death visibility (unresponsive
         // marking) runs on a different clock than gossip staleness. If
@@ -282,7 +302,8 @@ impl K2Sharding {
             *last_gone = gone.clone();
             if newly_gone {
                 for (agent_id, ctl) in states.iter_mut() {
-                    if ctl.pending.take().is_some() {
+                    if let Some(p) = ctl.pending.take() {
+                        cancelled.push((agent_id.clone(), p));
                         ctl.shrink_acc = Duration::ZERO;
                         self.intents.remove(agent_id);
                         if self.config.agentinfo_encoding {
@@ -312,6 +333,18 @@ impl K2Sharding {
                 }
             }
         }
+        // Tell peers, so they stop counting the cancelled shrinks as
+        // leaving (they would otherwise do so until the intents expire).
+        if self.config.withdraw_on_stand_down && !self.config.agentinfo_encoding
+        {
+            for (agent_id, p) in cancelled {
+                if let Some(agent) =
+                    local_agents.iter().find(|a| a.agent() == &agent_id)
+                {
+                    self.withdraw_intent(agent, p.vacate, p.expires_at).await;
+                }
+            }
+        }
         for agent in &local_agents {
             // The declared redundancy this agent sees around itself:
             // remote peers plus sibling local agents, excluding itself.
@@ -337,6 +370,7 @@ impl K2Sharding {
                         shrink_acc: Duration::ZERO,
                         pending: None,
                         pending_grow: None,
+                        syncing_grow: None,
                     }
                 });
 
@@ -402,6 +436,23 @@ impl K2Sharding {
             return;
         }
         if let Some(pending) = &ctl.pending_grow {
+            // A range that falls to one copy or none while we wait is
+            // repaired at once; the announcement stays up while it syncs.
+            if cfg.critical_repair
+                && is_critical(
+                    &grow_view(&grow_cov, live_intents, agent.agent()),
+                    pending.vacate,
+                )
+            {
+                tracing::debug!(
+                    agent = ?agent.agent(),
+                    "sharding: critical repair while a grow was pending"
+                );
+                let pending = ctl.pending_grow.take().expect("checked");
+                self.start_grow(agent, ctl);
+                self.keep_grow_announced(agent, ctl, pending);
+                return;
+            }
             if now >= pending.execute_at {
                 self.execute_grow(
                     agent,
@@ -409,6 +460,7 @@ impl K2Sharding {
                     &grow_cov,
                     live_intents,
                     live_grows,
+                    now,
                 )
                 .await;
             }
@@ -421,7 +473,25 @@ impl K2Sharding {
         // not actually hold could shrink us onto data we never synced.
         if agent.get_cur_storage_arc() != block_arc(ctl.home, ctl.target_level)
         {
+            // A coordinated grow stays announced until it has synced, so
+            // peers do not take the same range while the data arrives.
+            if let Some(g) = &mut ctl.syncing_grow
+                && let Some(expires_at) = refreshed_expiry(
+                    g.expires_at,
+                    now + cfg.check_interval(),
+                    g.wait,
+                )
+            {
+                g.expires_at = expires_at;
+                let range = g.vacate;
+                self.publish_grow_intent(agent, range, expires_at).await;
+            }
             return;
+        }
+        if ctl.syncing_grow.take().is_some() {
+            // Synced: the declared arc now covers the range, and peers
+            // drop the intent once they see it (retain_growers).
+            self.grow_intents.remove(agent.agent());
         }
         ctl.declared_level = ctl.target_level;
 
@@ -538,6 +608,7 @@ impl K2Sharding {
         ctl.shrink_acc = Duration::ZERO;
         ctl.pending = None;
         ctl.pending_grow = None;
+        ctl.syncing_grow = None;
         self.intents.remove(agent.agent());
         self.grow_intents.remove(agent.agent());
         agent.set_tgt_storage_arc_hint(block_arc(ctl.home, ctl.target_level));
@@ -576,8 +647,7 @@ impl K2Sharding {
         }
         let wait = self.wait_for(lag);
         let (execute_at, expires_at) = intent_times(now, wait);
-        let DhtArc::Arc(start, end) =
-            super::blocks::sectors_to_arc(range.0, range.1)
+        let DhtArc::Arc(..) = super::blocks::sectors_to_arc(range.0, range.1)
         else {
             return self.start_grow(agent, ctl);
         };
@@ -588,6 +658,27 @@ impl K2Sharding {
             wait,
         });
         ctl.grow_acc = Duration::ZERO;
+        tracing::debug!(
+            agent = ?agent.agent(),
+            ?range,
+            ?wait,
+            "sharding: announcing grow intent"
+        );
+        self.publish_grow_intent(agent, range, expires_at).await;
+    }
+
+    /// Record a grow intent for `range` and broadcast it.
+    async fn publish_grow_intent(
+        &self,
+        agent: &DynLocalAgent,
+        range: (u32, u32),
+        expires_at: Timestamp,
+    ) {
+        let DhtArc::Arc(start, end) =
+            super::blocks::sectors_to_arc(range.0, range.1)
+        else {
+            return;
+        };
         self.grow_intents.insert(
             agent.agent().clone(),
             ShrinkIntent {
@@ -596,14 +687,27 @@ impl K2Sharding {
                 from: None,
             },
         );
-        tracing::debug!(
-            agent = ?agent.agent(),
-            ?range,
-            ?wait,
-            "sharding: announcing grow intent"
-        );
         self.send_intent(agent, (start, end), expires_at, false, true)
             .await;
+    }
+
+    /// After `start_grow` from an announced grow: keep the intent up
+    /// (locally now, re-broadcast before it lapses) until the sync is done.
+    fn keep_grow_announced(
+        &self,
+        agent: &DynLocalAgent,
+        ctl: &mut AgentControl,
+        pending: PendingShrink,
+    ) {
+        self.grow_intents.insert(
+            agent.agent().clone(),
+            ShrinkIntent {
+                vacate: pending.vacate,
+                expires_at: pending.expires_at,
+                from: None,
+            },
+        );
+        ctl.syncing_grow = Some(pending);
     }
 
     /// Re-check an announced grow: take the range only if it is still
@@ -615,13 +719,13 @@ impl K2Sharding {
         cov: &[u32],
         live_intents: &[(AgentId, ShrinkIntent)],
         live_grows: &[(AgentId, ShrinkIntent)],
+        now: Timestamp,
     ) {
-        let Some(pending) = ctl.pending_grow.take() else {
+        let Some(mut pending) = ctl.pending_grow.take() else {
             return;
         };
-        self.grow_intents.remove(agent.agent());
         let range = pending.vacate;
-        if grow_recheck(
+        match grow_recheck(
             cov,
             live_intents,
             live_grows,
@@ -629,28 +733,51 @@ impl K2Sharding {
             range,
             self.config.target_redundancy,
         ) {
-            tracing::debug!(
-                agent = ?agent.agent(),
-                "sharding: executed coordinated grow"
-            );
-            self.start_grow(agent, ctl);
-        } else {
-            ctl.grow_acc = Duration::ZERO;
-            tracing::debug!(
-                agent = ?agent.agent(),
-                "sharding: grow intent stood down, already covered"
-            );
-            if let DhtArc::Arc(start, end) =
-                super::blocks::sectors_to_arc(range.0, range.1)
-            {
-                self.send_intent(
-                    agent,
-                    (start, end),
+            Recheck::Proceed => {
+                tracing::debug!(
+                    agent = ?agent.agent(),
+                    "sharding: executed coordinated grow"
+                );
+                self.start_grow(agent, ctl);
+                self.keep_grow_announced(agent, ctl, pending);
+            }
+            Recheck::Wait => {
+                // The lowest of several growers: keep the intent up and
+                // look again next interval, as the higher ones stand down.
+                pending.execute_at = now + self.config.check_interval();
+                if let Some(expires_at) = refreshed_expiry(
                     pending.expires_at,
-                    true,
-                    true,
-                )
-                .await;
+                    pending.execute_at,
+                    pending.wait,
+                ) {
+                    pending.expires_at = expires_at;
+                    self.publish_grow_intent(agent, range, expires_at).await;
+                }
+                tracing::debug!(
+                    agent = ?agent.agent(),
+                    "sharding: lowest grower waiting at re-check"
+                );
+                ctl.pending_grow = Some(pending);
+            }
+            Recheck::StandDown => {
+                self.grow_intents.remove(agent.agent());
+                ctl.grow_acc = Duration::ZERO;
+                tracing::debug!(
+                    agent = ?agent.agent(),
+                    "sharding: grow intent stood down, already covered"
+                );
+                if let DhtArc::Arc(start, end) =
+                    super::blocks::sectors_to_arc(range.0, range.1)
+                {
+                    self.send_intent(
+                        agent,
+                        (start, end),
+                        pending.expires_at,
+                        true,
+                        true,
+                    )
+                    .await;
+                }
             }
         }
     }
@@ -1290,9 +1417,12 @@ fn is_critical(eff: &[u32], range: (u32, u32)) -> bool {
     min_over(eff, range.0, range.1) <= 1
 }
 
-/// The V7 grow re-check: take `range` only if it is still short of the
-/// target, counting every other agent's announced vacate as gone and
-/// every lower-id announced grower overlapping it as already there.
+/// The V7 grow re-check, the patient-lowest rule read for growth (as
+/// `DecideJoin` with `Rule = "patient"` in polite-shrink's StaleBand.tla):
+/// every other agent's announced vacate counts as gone and every other
+/// announced grower overlapping `range` as already there. Grow if the
+/// range is still short; otherwise the lowest of several growers waits
+/// while higher ones are racing, and the rest stand down.
 fn grow_recheck(
     cov: &[u32],
     live_intents: &[(AgentId, ShrinkIntent)],
@@ -1300,14 +1430,24 @@ fn grow_recheck(
     own_id: &AgentId,
     range: (u32, u32),
     target_redundancy: u32,
-) -> bool {
+) -> Recheck {
     let mut eff = grow_view(cov, live_intents, own_id);
+    let (mut lower, mut higher) = (false, false);
     for (id, intent) in live_grows {
-        if id < own_id && overlaps(intent.vacate, range) {
-            add_sectors(&mut eff, intent.vacate.0, intent.vacate.1);
+        if id == own_id || !overlaps(intent.vacate, range) {
+            continue;
         }
+        add_sectors(&mut eff, intent.vacate.0, intent.vacate.1);
+        lower |= id < own_id;
+        higher |= id > own_id;
     }
-    min_over(&eff, range.0, range.1) < target_redundancy
+    if min_over(&eff, range.0, range.1) < target_redundancy {
+        Recheck::Proceed
+    } else if higher && !lower {
+        Recheck::Wait
+    } else {
+        Recheck::StandDown
+    }
 }
 
 /// Whether a peer last probed at `last` is due another probe.
@@ -1521,11 +1661,8 @@ pub(crate) mod view_delay {
         }
     }
 
-    type Snapshot = (
-        Timestamp,
-        Vec<Arc<AgentInfoSigned>>,
-        Vec<(AgentId, ShrinkIntent)>,
-    );
+    type Intents = Vec<(AgentId, ShrinkIntent)>;
+    type Snapshot = (Timestamp, Vec<Arc<AgentInfoSigned>>, Intents, Intents);
 
     #[derive(Debug, Default)]
     pub(crate) struct ViewDelay {
@@ -1537,19 +1674,20 @@ pub(crate) mod view_delay {
             &self,
             now: Timestamp,
             peers: Vec<Arc<AgentInfoSigned>>,
-            intents: Vec<(AgentId, ShrinkIntent)>,
-        ) -> (Vec<Arc<AgentInfoSigned>>, Vec<(AgentId, ShrinkIntent)>) {
+            intents: Intents,
+            grows: Intents,
+        ) -> (Vec<Arc<AgentInfoSigned>>, Intents, Intents) {
             let delay = Duration::from_millis(DELAY_MS.load(Ordering::Relaxed));
             let mut history = self.history.lock().expect("poisoned");
             if delay.is_zero() {
                 history.clear();
-                return (peers, intents);
+                return (peers, intents, grows);
             }
-            history.push_back((now, peers, intents));
+            history.push_back((now, peers, intents, grows));
             let Ok(cutoff) = now - delay else {
                 return history
                     .back()
-                    .map(|(_, p, i)| (p.clone(), i.clone()))
+                    .map(|(_, p, i, g)| (p.clone(), i.clone(), g.clone()))
                     .expect("just pushed");
             };
             // Keep the newest snapshot at or before the cutoff at the
@@ -1557,13 +1695,14 @@ pub(crate) mod view_delay {
             while history.len() >= 2 && history[1].0 <= cutoff {
                 history.pop_front();
             }
-            let (_, p, i) = &history[0];
-            let live = i
-                .iter()
-                .filter(|(_, intent)| intent.expires_at > now)
-                .cloned()
-                .collect();
-            (p.clone(), live)
+            let (_, p, i, g) = &history[0];
+            let live = |v: &Intents| -> Intents {
+                v.iter()
+                    .filter(|(_, intent)| intent.expires_at > now)
+                    .cloned()
+                    .collect()
+            };
+            (p.clone(), live(i), live(g))
         }
     }
 }
@@ -1812,30 +1951,46 @@ mod tests {
         assert!(!room_alongside(&thin, &one, &me, (0, 8), r));
     }
 
-    /// The grow re-check: grow only while the range is short, and a lower
-    /// id's announced grow counts as a copy already arriving, so of two
-    /// growers into a range one short, only the lower id grows.
+    /// The grow re-check (patient lowest, for growth): grow while the range
+    /// is short counting every other announced grower as there; when too
+    /// many are racing, the lowest waits and the others stand down.
     #[test]
     fn grow_recheck_lets_only_the_lowest_grower_take_a_short_range() {
         let r = 3;
         let me = agent(b"mmm");
         let short = vec![r - 1; NUM_SECTORS as usize];
-        assert!(grow_recheck(&short, &[], &[], &me, (0, 8), r));
+        let check = |cov: &[u32], vac: &[(AgentId, ShrinkIntent)], grows| {
+            grow_recheck(cov, vac, grows, &me, (0, 8), r)
+        };
+        assert_eq!(check(&short, &[], &[]), Recheck::Proceed);
+        // One copy short and a lower id growing too: stand down.
         let lower = vec![(agent(b"aaa"), intent((0, 8)))];
-        assert!(!grow_recheck(&short, &[], &lower, &me, (0, 8), r));
+        assert_eq!(check(&short, &[], &lower), Recheck::StandDown);
+        // One copy short and only higher ids growing: the lowest waits.
         let higher = vec![(agent(b"zzz"), intent((0, 8)))];
-        assert!(grow_recheck(&short, &[], &higher, &me, (0, 8), r));
+        assert_eq!(check(&short, &[], &higher), Recheck::Wait);
+        // A middle grower stands down.
+        let both = vec![
+            (agent(b"aaa"), intent((0, 8))),
+            (agent(b"zzz"), intent((0, 8))),
+        ];
+        assert_eq!(check(&short, &[], &both), Recheck::StandDown);
         let disjoint = vec![(agent(b"aaa"), intent((8, 16)))];
-        assert!(grow_recheck(&short, &[], &disjoint, &me, (0, 8), r));
+        assert_eq!(check(&short, &[], &disjoint), Recheck::Proceed);
+        // Two copies short: two growers both go, a third does not.
+        let two_short = vec![r - 2; NUM_SECTORS as usize];
+        assert_eq!(check(&two_short, &[], &higher), Recheck::Proceed);
+        assert_eq!(check(&two_short, &[], &lower), Recheck::Proceed);
+        assert_eq!(check(&two_short, &[], &both), Recheck::StandDown);
         // At the target there is nothing to repair...
         let full = vec![r; NUM_SECTORS as usize];
-        assert!(!grow_recheck(&full, &[], &[], &me, (0, 8), r));
+        assert_eq!(check(&full, &[], &[]), Recheck::StandDown);
         // ... unless another agent has announced it is leaving.
         let leaving = vec![(agent(b"bbb"), intent((0, 8)))];
-        assert!(grow_recheck(&full, &leaving, &[], &me, (0, 8), r));
+        assert_eq!(check(&full, &leaving, &[]), Recheck::Proceed);
         // Our own announced vacate is not counted against us.
         let own = vec![(me.clone(), intent((0, 8)))];
-        assert!(!grow_recheck(&full, &own, &[], &me, (0, 8), r));
+        assert_eq!(check(&full, &own, &[]), Recheck::StandDown);
     }
 
     /// Critical repair: one copy or none left, never two.
