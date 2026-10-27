@@ -141,6 +141,8 @@ struct Herd {
     grow_announced: usize,
     grow_executed: usize,
     grow_stood_down: usize,
+    /// Grow withdrawals applied by receivers.
+    grow_withdrawals: usize,
     critical: usize,
     holes_in_grace: usize,
     /// Fewest copies of any sector, 60 s after the kill.
@@ -303,6 +305,7 @@ async fn herd(coordinated: bool) -> Herd {
         grow_announced: count(GROW_ANNOUNCED),
         grow_executed: count(GROW_EXECUTED),
         grow_stood_down: count(GROW_STOOD_DOWN),
+        grow_withdrawals: count(GROW_WITHDRAWAL_APPLIED),
         critical: count(CRITICAL_REPAIR),
         holes_in_grace,
         min_end,
@@ -334,6 +337,12 @@ async fn growth_repairs_deaths_with_and_without_coordination() {
                 h.grow_announced,
                 h.grow_executed + h.grow_stood_down,
                 "an announced grow was neither executed nor stood down: {h:?}"
+            );
+            // A grower that stands down tells the others, who drop its
+            // intent at once instead of counting it as arriving.
+            assert!(
+                h.grow_stood_down == 0 || h.grow_withdrawals > 0,
+                "grows stood down but no withdrawal was applied: {h:?}"
             );
         } else {
             assert_eq!(0, h.grow_announced, "V6 announced a grow: {h:?}");

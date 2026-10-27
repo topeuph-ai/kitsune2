@@ -43,6 +43,8 @@ pub const GROW_ANNOUNCED: &str = "sharding: announcing grow intent";
 pub const GROW_EXECUTED: &str = "sharding: executed coordinated grow";
 pub const GROW_STOOD_DOWN: &str =
     "sharding: grow intent stood down, already covered";
+pub const GROW_WITHDRAWAL_APPLIED: &str =
+    "sharding: applied a grow withdrawal from its sender";
 pub const CRITICAL_REPAIR: &str = "sharding: critical repair, growing at once";
 
 /// Whether the functional tests probe sibling-half holders: on unless
