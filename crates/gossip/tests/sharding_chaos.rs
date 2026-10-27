@@ -152,6 +152,9 @@ struct Tally {
     staleness_changes: u32,
     /// Sector-samples where a count fell below target inside GRACE.
     dips_after_death: u64,
+    /// Kills followed by at least one such dip: one bad moment counts
+    /// once, however many sectors and samples it spans.
+    dip_incidents: u32,
     /// Sector-samples with no holder inside GRACE.
     holes_after_death: u64,
     announced: u64,
@@ -228,6 +231,7 @@ async fn chaos_soak_v6() {
     let start = tokio::time::Instant::now();
     let end = start + Duration::from_secs(secs);
     let mut last_kill: Option<tokio::time::Instant> = None;
+    let mut incident_counted = false;
     let mut prev: Vec<u32>;
     let mut next_report = start + Duration::from_secs(300);
 
@@ -256,6 +260,7 @@ async fn chaos_soak_v6() {
                     let i = ok[rng.below(ok.len() as u64) as usize];
                     drop(nodes.remove(i));
                     last_kill = Some(tokio::time::Instant::now());
+                    incident_counted = false;
                     t.kills += 1;
                 }
             }
@@ -303,6 +308,10 @@ async fn chaos_soak_v6() {
                         start.elapsed().as_secs_f64()
                     );
                     t.dips_after_death += 1;
+                    if !incident_counted {
+                        incident_counted = true;
+                        t.dip_incidents += 1;
+                    }
                 }
             }
             prev = cov;
