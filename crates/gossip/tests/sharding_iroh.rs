@@ -77,6 +77,12 @@ async fn storm_over_iroh(num_nodes: usize) -> StormStats {
         patient_lowest: true,
         withdraw_on_stand_down: true,
         require_recent_contact: recent_contact(),
+        announce_alongside: true,
+        coordinated_growth: coordinated_growth(),
+        critical_repair: true,
+        pinned: false,
+        probe_sibling_holders: probe_holders(),
+        probe_interval_ms: 1_000,
     })
     .with_transport(
         IrohTransportFactory::create(),
@@ -116,15 +122,25 @@ async fn storm_over_iroh(num_nodes: usize) -> StormStats {
         ..Default::default()
     };
 
-    // Reach full replication, then shard down below 60% with no orphan.
+    // Every node reaches a full arc, then the network shards down below
+    // 60% with no orphan. Early nodes may start shrinking before the last
+    // one is full (they announce alongside one another), so arm once each
+    // node has been full at least once, not when all are full together.
     let deadline = tokio::time::Instant::now() + Duration::from_secs(300);
+    let mut been_full = std::collections::HashSet::new();
     let mut armed = false;
     loop {
         let all = nodes.iter().collect::<Vec<_>>();
-        let cov = coverage(&agents(&all).await);
+        let now = agents(&all).await;
+        let cov = coverage(&now);
         let total: u32 = cov.iter().sum();
         if !armed {
-            armed = cov.iter().all(|&c| c == num_nodes as u32);
+            for (id, _, range) in &now {
+                if *range == Some((0, NUM_SECTORS)) {
+                    been_full.insert(id.clone());
+                }
+            }
+            armed = been_full.len() == num_nodes;
         } else {
             assert!(
                 cov.iter().all(|&c| c > 0),

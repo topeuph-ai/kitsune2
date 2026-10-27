@@ -107,6 +107,12 @@ fn config(wait_ms: u32) -> K2ShardingConfig {
         patient_lowest: true,
         withdraw_on_stand_down: true,
         require_recent_contact: recent_contact(),
+        announce_alongside: true,
+        coordinated_growth: coordinated_growth(),
+        critical_repair: true,
+        pinned: false,
+        probe_sibling_holders: probe_holders(),
+        probe_interval_ms: 1_000,
     }
 }
 

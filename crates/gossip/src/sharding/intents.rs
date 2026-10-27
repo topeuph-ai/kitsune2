@@ -124,6 +124,45 @@ pub(crate) fn retain_declared(
     });
 }
 
+/// Keep only grow intents that come from their agent's declared URL and
+/// name the half adjoining the arc that agent declares: the only range an
+/// agent can grow into. Our own agents' intents are kept as recorded.
+pub(crate) fn retain_growers(
+    live: &mut Vec<(AgentId, ShrinkIntent)>,
+    declared: &HashMap<AgentId, (DhtArc, Option<Url>)>,
+    own_ids: &HashSet<AgentId>,
+) {
+    live.retain(|(agent, intent)| {
+        if own_ids.contains(agent) {
+            return intent.from.is_none();
+        }
+        declared.get(agent).is_some_and(|(arc, url)| {
+            url.is_some()
+                && *url == intent.from
+                && is_sibling_of(arc, intent.vacate)
+        })
+    });
+}
+
+/// True if `range` is the half adjoining `arc` within the aligned block
+/// twice its size: the sibling an agent holding `arc` would grow into.
+fn is_sibling_of(arc: &DhtArc, (start, end): (u32, u32)) -> bool {
+    let DhtArc::Arc(a, b) = *arc else {
+        return false;
+    };
+    if b < a || start >= end || end > NUM_SECTORS {
+        return false;
+    }
+    let (s, e) = (a / SECTOR_SIZE, b / SECTOR_SIZE + 1);
+    let len = e - s;
+    if end - start != len || !len.is_power_of_two() {
+        return false;
+    }
+    let parent = len * 2;
+    let lo = s.min(start);
+    (start == e || end == s) && lo % parent == 0
+}
+
 /// True if every sector in the half-open range `[start, end)` lies fully
 /// within `arc`. Handles wrapping arcs by checking per sector, the same
 /// containment rule the coverage counters use.
@@ -240,6 +279,55 @@ mod tests {
             vec![(agent(b"small"), (8, 16)), (agent(b"me"), (0, 8))],
             kept
         );
+    }
+
+    #[test]
+    fn grow_intents_must_name_the_adjoining_half() {
+        let sector = |s: u32| s * SECTOR_SIZE;
+        // "small" declares the aligned block [16, 24); its sibling within
+        // the parent block [16, 32) is [24, 32).
+        let declared: HashMap<AgentId, (DhtArc, Option<Url>)> = [(
+            agent(b"small"),
+            (DhtArc::Arc(sector(16), sector(24) - 1), url("peer")),
+        )]
+        .into();
+        let own: HashSet<AgentId> = [agent(b"me")].into();
+        let mut live = vec![
+            // the sibling half: kept
+            (agent(b"small"), intent((24, 32))),
+            // adjoining but in the wrong parent block ([8, 16) belongs
+            // with [0, 8)): dropped
+            (agent(b"small"), intent((8, 16))),
+            // the right place but the wrong size: dropped
+            (agent(b"small"), intent((24, 40))),
+            // its own arc (not a grow at all): dropped
+            (agent(b"small"), intent((16, 24))),
+            // unknown announcer: dropped
+            (agent(b"ghost"), intent((24, 32))),
+            // own agents bypass validation
+            (agent(b"me"), local((0, 8))),
+        ];
+        retain_growers(&mut live, &declared, &own);
+        let kept: Vec<_> =
+            live.iter().map(|(a, i)| (a.clone(), i.vacate)).collect();
+        assert_eq!(
+            vec![(agent(b"small"), (24, 32)), (agent(b"me"), (0, 8))],
+            kept
+        );
+        // The lower half of a parent block grows upward too: [0, 8) -> [8, 16).
+        assert!(is_sibling_of(&DhtArc::Arc(0, sector(8) - 1), (8, 16)));
+        // A full arc has nothing to grow into.
+        assert!(!is_sibling_of(&DhtArc::FULL, (0, NUM_SECTORS)));
+        // A wrong sender is dropped.
+        let mut wrong = vec![(
+            agent(b"small"),
+            ShrinkIntent {
+                from: url("other"),
+                ..intent((24, 32))
+            },
+        )];
+        retain_growers(&mut wrong, &declared, &own);
+        assert!(wrong.is_empty());
     }
 
     #[test]

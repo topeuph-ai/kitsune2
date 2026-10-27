@@ -84,6 +84,7 @@ async fn cascade_run(
         withdraw,
         grow_persistence,
         false,
+        true,
     )
     .await
 }
@@ -94,6 +95,7 @@ async fn cascade_run_ordered(
     withdraw: bool,
     grow_persistence: f64,
     ascending: bool,
+    alongside: bool,
 ) -> Outcome {
     let events = events();
     events.lock().unwrap().clear();
@@ -131,6 +133,12 @@ async fn cascade_run_ordered(
         patient_lowest,
         withdraw_on_stand_down: withdraw,
         require_recent_contact: recent_contact(),
+        announce_alongside: alongside,
+        coordinated_growth: coordinated_growth(),
+        critical_repair: true,
+        pinned: false,
+        probe_sibling_holders: probe_holders(),
+        probe_interval_ms: 1_000,
     });
 
     // Keep creating single-agent nodes until four have their home sector
@@ -300,13 +308,16 @@ async fn forced_cascade_masked_by_fast_regrow() {
     );
 }
 
-/// The announce-time yield. Fresh views, V6, announcements scheduled in
-/// ASCENDING id order 1 s apart: once the lowest has announced, the others
-/// must not announce until its intent has resolved.
+/// The announce-time yield, with `announce_alongside` off (which relaxes
+/// it by design; sharding_alongside tests that). Fresh views, V6,
+/// announcements scheduled in ASCENDING id order 1 s apart: once the
+/// lowest has announced, the others must not announce until its intent has
+/// resolved.
 #[tokio::test(flavor = "multi_thread")]
 async fn higher_ids_yield_while_a_lower_id_is_announcing() {
     let _serial = SERIAL.lock().await;
-    let o = cascade_run_ordered(true, false, true, SLOW_REGROW, true).await;
+    let o =
+        cascade_run_ordered(true, false, true, SLOW_REGROW, true, false).await;
     let lowest = &o.order[0];
     let mut open = false;
     for (a, m) in &o.log {

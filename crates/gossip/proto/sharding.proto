@@ -11,8 +11,19 @@ message K2ShardingMessage {
   oneof msg {
     // An announcement of intent to shrink a storage arc.
     K2ShardingShrinkIntentMessage shrink_intent = 1;
+
+    // A liveness probe; see K2ShardingProbeMessage.
+    K2ShardingProbeMessage probe = 2;
   }
 }
+
+// A liveness probe, with no content. An agent sends it to the holders of
+// the half it would grow into: gossip runs only between agents whose arcs
+// overlap, so without it a holder of that half could die unnoticed, and
+// the gap it left stay hidden until its agent info expired. A failed send
+// marks the holder unresponsive, as for any other send. Receivers ignore
+// it; ones that do not know it decode an empty message and ignore that.
+message K2ShardingProbeMessage {}
 
 // Announces that the sending agent intends to shrink its storage arc,
 // vacating the given range of DHT locations.
@@ -42,4 +53,11 @@ message K2ShardingShrinkIntentMessage {
   // expiry: the sender stood down and keeps holding the range. Receivers
   // drop that intent at once instead of letting it age out.
   bool withdrawn = 5;
+
+  // True for an intent to GROW into the range rather than vacate it: the
+  // sender means to take the given range, which adjoins the arc it holds
+  // (V7 coordinated growth). Receivers that do not know this field read
+  // it as a vacate of a range the sender does not hold, which their
+  // declared-range check already discards, so mixing versions is safe.
+  bool grow = 6;
 }

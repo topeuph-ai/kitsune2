@@ -32,6 +32,27 @@ pub fn recent_contact() -> bool {
     std::env::var("SHARDING_RECENT_CONTACT").map_or(true, |v| v != "0")
 }
 
+/// Whether the functional tests run with V7's coordinated growth: off
+/// unless `SHARDING_COORDINATED_GROWTH=1`, so the whole suite can be run
+/// both ways.
+pub fn coordinated_growth() -> bool {
+    std::env::var("SHARDING_COORDINATED_GROWTH").is_ok_and(|v| v == "1")
+}
+
+pub const GROW_ANNOUNCED: &str = "sharding: announcing grow intent";
+pub const GROW_EXECUTED: &str = "sharding: executed coordinated grow";
+pub const GROW_STOOD_DOWN: &str =
+    "sharding: grow intent stood down, already covered";
+pub const GROW_WITHDRAWAL_APPLIED: &str =
+    "sharding: applied a grow withdrawal from its sender";
+pub const CRITICAL_REPAIR: &str = "sharding: critical repair, growing at once";
+
+/// Whether the functional tests probe sibling-half holders: on unless
+/// `SHARDING_PROBE=0`.
+pub fn probe_holders() -> bool {
+    std::env::var("SHARDING_PROBE").map_or(true, |v| v != "0")
+}
+
 /// Sharding-module log events, `(agent, message)`, in arrival order.
 pub type Events = Arc<Mutex<Vec<(String, String)>>>;
 

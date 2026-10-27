@@ -177,6 +177,77 @@ pub struct K2ShardingConfig {
     /// Default: true
     #[cfg_attr(feature = "schema", schemars(default))]
     pub require_recent_contact: bool,
+
+    /// Let an agent announce a shrink alongside lower-id agents racing it
+    /// for the same range, when there is room for all of them.
+    ///
+    /// Without it, an agent never announces while a lower id is announcing
+    /// for an overlapping range, so agents sharing a range shrink one at a
+    /// time. From full arcs every agent's first shrink drops one of the
+    /// same two halves, and sharding down can then be several times slower
+    /// than it needs to be (polite-shrink `reports/REPORT_v7.md`). With it,
+    /// an agent holds off only if, counting itself and every lower-id
+    /// racer as gone, its half would keep fewer than `target_redundancy`
+    /// copies. The re-check is unchanged, so this cannot affect safety.
+    ///
+    /// Default: true
+    #[cfg_attr(feature = "schema", schemars(default))]
+    pub announce_alongside: bool,
+
+    /// Coordinate growing as well as shrinking (V7).
+    ///
+    /// Without it, every agent that sees a short sector grows on its own,
+    /// so one gap can draw several growers. With it, an agent announces
+    /// the range it means to take, waits as for a shrink, and re-checks:
+    /// it grows only if the range is still short counting every lower-id
+    /// agent that has announced growing into it as already there;
+    /// otherwise it stands down. Growing below the small-network clamp,
+    /// and a critical repair (see `critical_repair`), happen at once.
+    ///
+    /// Default: false (V7 is under test)
+    #[cfg_attr(feature = "schema", schemars(default))]
+    pub coordinated_growth: bool,
+
+    /// With `coordinated_growth`, grow at once, without announcing, when a
+    /// sector of the range is down to one copy or none.
+    ///
+    /// Default: true
+    #[cfg_attr(feature = "schema", schemars(default))]
+    pub critical_repair: bool,
+
+    /// Keep the full arc and never shrink.
+    ///
+    /// For a machine that should hold everything: a server, or a site's
+    /// main machine that must keep the whole network available to that
+    /// site when it is cut off from the rest. Other agents count it like
+    /// any holder.
+    ///
+    /// Default: false
+    #[cfg_attr(feature = "schema", schemars(default))]
+    pub pinned: bool,
+
+    /// Probe the holders of the half each agent would grow into, at most
+    /// once per `probe_interval_ms` each.
+    ///
+    /// Gossip runs only between agents whose arcs overlap, and a peer is
+    /// marked unresponsive only when a send to it fails. Once a network has
+    /// sharded, an agent never contacts the holders of the half it would
+    /// grow into, so their deaths went unnoticed and the gaps they left
+    /// stayed hidden until their agent info expired (agent infos are valid
+    /// for 20 minutes and re-signed when under 5 remain, so up to about 20
+    /// minutes). A probe is an empty message; when it fails, the holder is
+    /// marked unresponsive and the gap shows.
+    ///
+    /// Default: true
+    #[cfg_attr(feature = "schema", schemars(default))]
+    pub probe_sibling_holders: bool,
+
+    /// The least time between two probes of the same peer, in
+    /// milliseconds.
+    ///
+    /// Default: 10,000 (10s)
+    #[cfg_attr(feature = "schema", schemars(default))]
+    pub probe_interval_ms: u32,
 }
 
 impl Default for K2ShardingConfig {
@@ -195,6 +266,12 @@ impl Default for K2ShardingConfig {
             patient_lowest: true,
             withdraw_on_stand_down: true,
             require_recent_contact: true,
+            announce_alongside: true,
+            coordinated_growth: false,
+            critical_repair: true,
+            pinned: false,
+            probe_sibling_holders: true,
+            probe_interval_ms: 10_000,
         }
     }
 }
@@ -227,6 +304,11 @@ mod tests {
         assert!(c.patient_lowest);
         assert!(c.withdraw_on_stand_down);
         assert!(c.require_recent_contact);
+        assert!(c.announce_alongside);
+        assert!(!c.coordinated_growth);
+        assert!(c.critical_repair);
+        assert!(!c.pinned);
+        assert!(c.probe_sibling_holders);
         assert!(!c.agentinfo_encoding);
     }
 }

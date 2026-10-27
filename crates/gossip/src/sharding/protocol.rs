@@ -41,6 +41,7 @@ mod tests {
                     vacate_end: (15 << 23) - 1,
                     expires_at_us: 1_234_567,
                     withdrawn: false,
+                    grow: false,
                 },
             )),
         };
@@ -50,6 +51,20 @@ mod tests {
         ))
         .unwrap();
 
+        assert_eq!(msg, decoded);
+    }
+
+    #[test]
+    fn probe_round_trip() {
+        let msg = K2ShardingMessage {
+            msg: Some(k2_sharding_message::Msg::Probe(
+                K2ShardingProbeMessage {},
+            )),
+        };
+        let decoded = deserialize_sharding_message(serialize_sharding_message(
+            msg.clone(),
+        ))
+        .unwrap();
         assert_eq!(msg, decoded);
     }
 }
